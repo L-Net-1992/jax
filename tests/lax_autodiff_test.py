@@ -28,11 +28,10 @@ import jax
 from jax import dtypes
 from jax import lax
 from jax._src import test_util as jtu
+from jax._src.util import NumpyComplexWarning
 from jax.test_util import check_grads
 
-from jax.config import config
-config.parse_flags_with_absl()
-FLAGS = config.FLAGS
+jax.config.parse_flags_with_absl()
 
 
 compatible_shapes = [[(3,)],
@@ -68,6 +67,8 @@ LAX_GRAD_OPS = [
 
     grad_test_spec(lax.exp, nargs=1, order=2, rng_factory=jtu.rand_small,
                    dtypes=grad_inexact_dtypes),
+    grad_test_spec(lax.exp2, nargs=1, order=2, rng_factory=jtu.rand_small,
+                   dtypes=grad_inexact_dtypes),
     grad_test_spec(lax.expm1, nargs=1, order=2, rng_factory=jtu.rand_default,
                    dtypes=grad_inexact_dtypes),
     grad_test_spec(lax.log, nargs=1, order=2, rng_factory=jtu.rand_positive,
@@ -79,7 +80,7 @@ LAX_GRAD_OPS = [
     grad_test_spec(lax.cosh, nargs=1, order=2, rng_factory=jtu.rand_default,
                    dtypes=grad_inexact_dtypes, tol=1e-5),
     grad_test_spec(lax.tanh, nargs=1, order=2, rng_factory=jtu.rand_default,
-                   dtypes=grad_inexact_dtypes, tol=1e-4),
+                   dtypes=grad_inexact_dtypes, tol=2e-4),
     grad_test_spec(lax.sin, nargs=1, order=2, rng_factory=jtu.rand_default,
                    dtypes=grad_inexact_dtypes, tol={np.float32: 5e-1}),
     grad_test_spec(lax.cos, nargs=1, order=2, rng_factory=jtu.rand_default,
@@ -131,8 +132,8 @@ LAX_GRAD_OPS = [
     grad_test_spec(lax.rsqrt, nargs=1, order=2, rng_factory=jtu.rand_positive,
                    dtypes=grad_float_dtypes),
     grad_test_spec(lax.rsqrt, nargs=1, order=2, rng_factory=jtu.rand_default,
-                   dtypes=grad_complex_dtypes),
-    grad_test_spec(lax.cbrt, nargs=1, order=2, rng_factory=jtu.rand_default,
+                   dtypes=grad_complex_dtypes, tol={np.float64: 2e-3}),
+    grad_test_spec(lax.cbrt, nargs=1, order=2, rng_factory=jtu.rand_not_small,
                    dtypes=grad_float_dtypes, tol={np.float64: 5e-3}),
     grad_test_spec(lax.logistic, nargs=1, order=2,
                    rng_factory=jtu.rand_default,
@@ -164,12 +165,8 @@ def grad_special_values_test_spec(op, values, tol=None):
   return GradSpecialValuesTestSpec(op, values, tol)
 
 LAX_GRAD_SPECIAL_VALUE_TESTS = [
-    grad_special_values_test_spec(
-      lax.sinh, [0.],
-      tol={np.float32: 1e-2} if jtu.device_under_test() == "tpu" else None),
-    grad_special_values_test_spec(
-      lax.cosh, [0.],
-      tol={np.float32: 1e-2} if jtu.device_under_test() == "tpu" else None),
+    grad_special_values_test_spec(lax.sinh, [0.]),
+    grad_special_values_test_spec(lax.cosh, [0.]),
     grad_special_values_test_spec(lax.tanh, [0., 1000.], tol=5e-3),
     grad_special_values_test_spec(lax.sin, [0., np.pi, np.pi/2., np.pi/4.]),
     grad_special_values_test_spec(lax.cos, [0., np.pi, np.pi/2., np.pi/4.]),
@@ -208,10 +205,15 @@ class LaxAutodiffTest(jtu.JaxTestCase):
   ))
   def testOpGrad(self, op, rng_factory, shapes, dtype, order, tol):
     rng = rng_factory(self.rng())
-    if jtu.device_under_test() == "tpu":
+    if jtu.test_device_matches(["cpu"]):
+      if op is lax.cosh and dtype == np.complex64:
+        tol = 3e-1  # 2nd-order gradients are noisy on CPU
+    if jtu.test_device_matches(["tpu"]):
       if op is lax.pow:
         raise SkipTest("pow grad imprecise on tpu")
       if op is lax.cos:
+        order = 1  # 2nd-order gradient is imprecise on TPU.
+      if op is lax.log:
         order = 1  # 2nd-order gradient is imprecise on TPU.
 
     tol = jtu.join_tolerance(1.5e-1, tol) if jtu.num_float_bits(dtype) == 32 else tol
@@ -226,6 +228,8 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     for rec in LAX_GRAD_SPECIAL_VALUE_TESTS
   ))
   def testOpGradSpecialValue(self, op, special_value, tol):
+    if op in (lax.sinh, lax.cosh) and jtu.test_device_matches(["tpu"]):
+      tol = {np.float32: 1e-2}
     check_grads(op, (special_value,), 2, ["fwd", "rev"], rtol=tol, atol=tol)
 
   @jtu.sample_product(
@@ -238,7 +242,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
               jtu.tolerance(from_dtype, jtu.default_gradient_tolerance))
     args = (rng((2, 3), from_dtype),)
     convert_element_type = lambda x: lax.convert_element_type(x, to_dtype)
-    convert_element_type = jtu.ignore_warning(category=np.ComplexWarning)(
+    convert_element_type = jtu.ignore_warning(category=NumpyComplexWarning)(
       convert_element_type)
     check_grads(convert_element_type, args, 2, ["fwd", "rev"], tol, tol, eps=1.)
 
@@ -271,6 +275,24 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     operands = tuple(rng(shape, dtype) for shape in shapes)
     concatenate = lambda *args: lax.concatenate(args, dim)
     check_grads(concatenate, operands, 2, ["fwd", "rev"], eps=1.)
+
+  @jtu.sample_product(
+    [dict(base_shape=base_shape, axis=axis)
+      for base_shape in [(4,), (3, 4), (2, 3, 4)]
+      for axis in range(len(base_shape))
+    ],
+    num_pieces=range(3),
+    dtype=float_dtypes,
+  )
+  def testSplitGrad(self, axis, base_shape, dtype, num_pieces):
+    sizes = jtu.rand_int(self.rng(), 5)((num_pieces + 1,), np.int64)
+    shape = list(base_shape)
+    shape[axis] = np.sum(sizes)
+    rng = jtu.rand_default(self.rng())
+    operands = (rng(shape, dtype),)
+    split = lambda x: lax.split(x, sizes, axis)
+    check_grads(split, operands, 2, ["fwd", "rev"], eps=1.)
+
 
   @jtu.sample_product(
     [dict(lhs_shape=lhs_shape, rhs_shape=rhs_shape, strides=strides)
@@ -390,8 +412,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
                          atol=tol, rtol=tol)
     # check that precision config is preserved
     result, pullback = jax.vjp(dot, lhs, rhs)
-    gresult = lax.zeros_like_array(result)
-    s = str(jax.make_jaxpr(pullback)(gresult))
+    s = str(jax.make_jaxpr(pullback)(result))
     assert "Precision.HIGHEST" in s
 
   @jtu.sample_product(
@@ -415,14 +436,21 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     rhs = rng(rhs_shape, dtype)
     dot_general = partial(lax.dot_general, dimension_numbers=dimension_numbers,
                           precision=lax.Precision.HIGHEST)
-    atol = {np.float16: 5E-2} if jtu.device_under_test() == 'tpu' else None
+    atol = {np.float16: 5E-2} if jtu.test_device_matches(['tpu']) else None
     check_grads_bilinear(dot_general, (lhs, rhs), order=2,
                          modes=["fwd", "rev"], atol=atol)
     # check that precision config is preserved
     result, pullback = jax.vjp(dot_general, lhs, rhs)
-    gresult = lax.zeros_like_array(result)
-    s = str(jax.make_jaxpr(pullback)(gresult))
+    s = str(jax.make_jaxpr(pullback)(result))
     assert "Precision.HIGHEST" in s
+
+  def testDotPreferredElementType(self):
+    # https://github.com/jax-ml/jax/issues/10818
+    x = jax.numpy.ones((), jax.numpy.float16)
+    def f(x):
+      return jax.lax.dot_general(x, x, (((), ()), ((), ())),
+                                 preferred_element_type=jax.numpy.float32)
+    jax.jacrev(f)(x)  # don't crash!
 
   @jtu.sample_product(
     shape=[(), (2, 3)],
@@ -506,7 +534,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
                 rtol={np.float32: 3e-3})
 
   def testPowSecondDerivative(self):
-    # https://github.com/google/jax/issues/12033
+    # https://github.com/jax-ml/jax/issues/12033
     x, y = 4.0, 0.0
     expected = ((0.0, 1/x), (1/x, np.log(x) ** 2))
 
@@ -521,9 +549,29 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     with self.subTest("zero to the zero"):
       result = jax.grad(lax.pow)(0.0, 0.0)
       # TODO(jakevdp) special-case zero in a way that doesn't break other cases
-      # See https://github.com/google/jax/pull/12041#issuecomment-1222766191
+      # See https://github.com/jax-ml/jax/pull/12041#issuecomment-1222766191
       # self.assertEqual(result, 0.0)
       self.assertAllClose(result, np.nan)
+
+  def testPowIntPowerAtZero(self):
+    # https://github.com/jax-ml/jax/issues/14397
+    ans = jax.grad(jax.jit(lambda x, n: x ** n))(0., 0)
+    self.assertAllClose(ans, 0., check_dtypes=False)
+
+  @jax.numpy_dtype_promotion('standard')  # This test explicitly exercises mixed type promotion
+  def testPowIntPowerAtZero2(self):
+    # https://github.com/jax-ml/jax/issues/17995
+    a = lambda z: jax.numpy.sum(z**jax.numpy.arange(0, 2, dtype=int))
+    b = lambda z: jax.numpy.sum(z**jax.numpy.arange(0, 2, dtype=float))
+    c = lambda z: 1 + z
+    d = lambda z: z ** 0 + z
+    e = lambda z: z ** 0. + z
+
+    self.assertAllClose(jax.grad(a)(3.14), 1., check_dtypes=False)
+    self.assertAllClose(jax.grad(b)(3.14), 1., check_dtypes=False)
+    self.assertAllClose(jax.grad(c)(3.14), 1., check_dtypes=False)
+    self.assertAllClose(jax.grad(d)(3.14), 1., check_dtypes=False)
+    self.assertAllClose(jax.grad(e)(3.14), 1., check_dtypes=False)
 
   @jtu.sample_product(
     [dict(arg_shape=arg_shape, pred_shape=pred_shape)
@@ -607,7 +655,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     check_grads(dus, (update,), 2, ["fwd", "rev"], eps=1.)
 
   def testDynamicSliceValueAndGrad(self):
-    # Regression test for https://github.com/google/jax/issues/10984
+    # Regression test for https://github.com/jax-ml/jax/issues/10984
     # Issue arose due to an out-of-range negative index.
     rng = jtu.rand_default(self.rng())
     shape = (5, 5)
@@ -622,7 +670,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     self.assertAllClose(result1, result2)
 
   def testDynamicUpdateSliceValueAndGrad(self):
-    # Regression test for https://github.com/google/jax/issues/10984
+    # Regression test for https://github.com/jax-ml/jax/issues/10984
     # Issue arose due to an out-of-range negative index.
     rng = jtu.rand_default(self.rng())
     shape = (5, 5)
@@ -679,7 +727,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
   )
   def testReduceGrad(self, op, init_val, shape, dtype, dims, rng_factory):
     rng = rng_factory(self.rng())
-    if jtu.device_under_test() == "tpu" and op is lax.mul:
+    if jtu.test_device_matches(["tpu"]) and op is lax.mul:
       raise SkipTest("unimplemented case")
     tol = {dtypes.bfloat16: 2e-1, np.float16: 1e-1, np.float32: 1e-1,
            np.float64: 1e-3, np.complex64: 1e-1}
@@ -757,7 +805,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     # test method, rather than at the parameterized test level, because it
     # depends on FLAGS for the device under test.
     # TODO(b/31565929): enable when fixed.
-    if jtu.device_under_test() == "tpu" and op is not lax.add:
+    if jtu.test_device_matches(["tpu"]) and op is not lax.add:
       if (len(shape) != 4 or dims != (1, 1, 2, 1)
           or not isinstance(padding, str)):
         raise SkipTest("Only R4 SelectAndScatter implemented on TPU")
@@ -804,7 +852,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
   # TODO(b/205052657): enable more tests when supported
   @jtu.sample_product(
     [dict(shape=shape, axis=axis)
-      for shape in [(5,), (5, 7)]
+      for shape in [(5,), (5, 7), (4, 9, 3)]
       for axis in [len(shape) - 1]
     ],
     dtype=[np.float32],
@@ -819,7 +867,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
   # TODO(b/205052657): enable more tests when supported
   @jtu.sample_product(
     [dict(shape=shape, axis=axis)
-      for shape in [(3,), (5, 3)]
+      for shape in [(3,), (5, 3), (4, 9, 3)]
       for axis in [len(shape) - 1]
     ],
     key_dtype=[np.float32],
@@ -977,7 +1025,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     check_grads(scatter, (x, y), 2, ["fwd", "rev"], 1e-2, 1e-2, 1.)
 
   def testScatterGradSymbolicZeroUpdate(self):
-    # https://github.com/google/jax/issues/1901
+    # https://github.com/jax-ml/jax/issues/1901
     def f(x):
       n = x.shape[0]
       y = np.arange(n, dtype=x.dtype)
@@ -1084,7 +1132,7 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     check_grads(lax.rem, (x, y), 2, ["fwd", "rev"])
 
   def testHigherOrderGradientOfReciprocal(self):
-    # Regression test for https://github.com/google/jax/issues/3136
+    # Regression test for https://github.com/jax-ml/jax/issues/3136
     def inv(x):
       # N.B.: intentionally written as 1/x, not x ** -1 or reciprocal(x)
       return 1 / x
@@ -1104,6 +1152,31 @@ class LaxAutodiffTest(jtu.JaxTestCase):
     actual, = transpose(1.)
     expected = -1.j
     self.assertEqual(actual, expected)
+
+  def test_scatter_apply_jvp(self):
+    def f(x):
+      return x.at[1].apply(jax.numpy.sin)
+
+    x = jax.numpy.array([1.0, 2.0])
+    with self.assertRaises(NotImplementedError):
+      jax.jacfwd(f)(x)
+
+  def test_scatter_apply_vjp(self):
+    def f(x):
+      return x.at[1].apply(jax.numpy.sin)
+
+    x = jax.numpy.array([1.0, 2.0])
+
+    with self.assertRaises(NotImplementedError):
+      jax.jacrev(f)(x)
+
+  def testPowShapeMismatch(self):
+    # Regression test for https://github.com/jax-ml/jax/issues/17294
+    x = lax.iota('float32', 4)
+    y = 2
+    actual = jax.jacrev(jax.jit(jax.lax.pow))(x, y)  # no error
+    expected = jax.numpy.diag(y * x ** (y - 1))
+    self.assertArraysEqual(actual, expected)
 
 
 if __name__ == '__main__':

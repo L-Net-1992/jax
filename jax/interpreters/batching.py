@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Note: import <name> as <name> is required for names to be exported.
-# See PEP 484 & https://github.com/google/jax/issues/7570
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
 
 from jax._src.interpreters.batching import (
   Array as Array,
@@ -21,7 +21,7 @@ from jax._src.interpreters.batching import (
   BatchTrace as BatchTrace,
   BatchTracer as BatchTracer,
   BatchingRule as BatchingRule,
-  ConcatAxis as ConcatAxis,
+  RaggedAxis as RaggedAxis,
   Elt as Elt,
   FromEltHandler as FromEltHandler,
   GetIdx as GetIdx,
@@ -29,14 +29,13 @@ from jax._src.interpreters.batching import (
   MakeIotaHandler as MakeIotaHandler,
   MapSpec as MapSpec,
   NotMapped as NotMapped,
-  Pile as Pile,
-  PileAxis as PileAxis,
-  PileTy as PileTy,
+  Jumble as Jumble,
+  JumbleAxis as JumbleAxis,
+  JumbleTy as JumbleTy,
   ToEltHandler as ToEltHandler,
   Vmappable as Vmappable,
   Zero as Zero,
   ZeroIfMapped as ZeroIfMapped,
-  add_batched as add_batched,
   axis_primitive_batchers as axis_primitive_batchers,
   batch as batch,
   batch_custom_jvp_subtrace as batch_custom_jvp_subtrace,
@@ -51,6 +50,7 @@ from jax._src.interpreters.batching import (
   defbroadcasting as defbroadcasting,
   defreducer as defreducer,
   defvectorized as defvectorized,
+  fancy_primitive_batchers as fancy_primitive_batchers,
   flatten_fun_for_vmap as flatten_fun_for_vmap,
   from_elt as from_elt,
   from_elt_handlers as from_elt_handlers,
@@ -60,22 +60,16 @@ from jax._src.interpreters.batching import (
   matchaxis as matchaxis,
   moveaxis as moveaxis,
   not_mapped as not_mapped,
-  pile_axis as pile_axis,
+  jumble_axis as jumble_axis,
   primitive_batchers as primitive_batchers,
-  reassemble_concat_axes as reassemble_concat_axes,
   reducer_batcher as reducer_batcher,
   register_vmappable as register_vmappable,
-  segment_sum as segment_sum,
   spec_types as spec_types,
-  spmd_axis_primitive_batchers as spmd_axis_primitive_batchers,
   to_elt as to_elt,
   to_elt_handlers as to_elt_handlers,
-  unpack_concat_axes as unpack_concat_axes,
   unregister_vmappable as unregister_vmappable,
   vectorized_batcher as vectorized_batcher,
   vmappables as vmappables,
   vtile as vtile,
   zero_if_mapped as zero_if_mapped,
-  zeros_like_batched as zeros_like_batched,
-  zeros_like_p as zeros_like_p,
 )

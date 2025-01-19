@@ -16,13 +16,15 @@
 
 load(
     "//jaxlib:jax.bzl",
-    "flatbuffer_cc_library",
-    "pybind_extension",
+    "nanobind_extension",
 )
 
 licenses(["notice"])
 
-package(default_visibility = ["//:__subpackages__"])
+package(
+    default_applicable_licenses = [],
+    default_visibility = ["//jax:internal"],
+)
 
 # LAPACK
 
@@ -30,9 +32,17 @@ cc_library(
     name = "lapack_kernels",
     srcs = ["lapack_kernels.cc"],
     hdrs = ["lapack_kernels.h"],
+    copts = ["-fexceptions"],
+    features = ["-use_header_modules"],
     deps = [
-        "@org_tensorflow//tensorflow/compiler/xla/service:custom_call_status",
+        "//jaxlib:ffi_helpers",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:dynamic_annotations",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla/ffi/api:c_api",
+        "@xla//xla/ffi/api:ffi",
+        "@xla//xla/service:custom_call_status",
     ],
 )
 
@@ -43,58 +53,28 @@ cc_library(
     alwayslink = 1,
 )
 
-pybind_extension(
+nanobind_extension(
     name = "_lapack",
     srcs = ["lapack.cc"],
     copts = [
         "-fexceptions",
         "-fno-strict-aliasing",
     ],
+    enable_stub_generation = False,  # generated stubs are incorrect
     features = ["-use_header_modules"],
     module_name = "_lapack",
+    pytype_srcs = [
+        "_lapack/__init__.pyi",
+        "_lapack/schur.pyi",
+        "_lapack/svd.pyi",
+        "_lapack/eig.pyi",
+    ],
     deps = [
         ":lapack_kernels",
-        "//jaxlib:kernel_pybind11_helpers",
-        "@pybind11",
-    ],
-)
-
-# DUCC (CPU FFTs)
-
-flatbuffer_cc_library(
-    name = "ducc_fft_flatbuffers_cc",
-    srcs = ["ducc_fft.fbs"],
-)
-
-cc_library(
-    name = "ducc_fft_kernels",
-    srcs = ["ducc_fft_kernels.cc"],
-    hdrs = ["ducc_fft_kernels.h"],
-    copts = ["-fexceptions"],  # DUCC may throw.
-    features = ["-use_header_modules"],
-    deps = [
-        ":ducc_fft_flatbuffers_cc",
-        "@org_tensorflow//tensorflow/compiler/xla/service:custom_call_status",
-        "@ducc",
-        "@flatbuffers//:runtime_cc",
-    ],
-)
-
-pybind_extension(
-    name = "_ducc_fft",
-    srcs = ["ducc_fft.cc"],
-    copts = [
-        "-fexceptions",
-        "-fno-strict-aliasing",
-    ],
-    features = ["-use_header_modules"],
-    module_name = "_ducc_fft",
-    deps = [
-        ":ducc_fft_flatbuffers_cc",
-        ":ducc_fft_kernels",
-        "//jaxlib:kernel_pybind11_helpers",
-        "@flatbuffers//:runtime_cc",
-        "@pybind11",
+        "//jaxlib:kernel_nanobind_helpers",
+        "@com_google_absl//absl/base",
+        "@nanobind",
+        "@xla//xla/ffi/api:ffi",
     ],
 )
 
@@ -103,10 +83,11 @@ cc_library(
     srcs = ["cpu_kernels.cc"],
     visibility = ["//visibility:public"],
     deps = [
-        ":ducc_fft_kernels",
         ":lapack_kernels",
         ":lapack_kernels_using_lapack",
-        "@org_tensorflow//tensorflow/compiler/xla/service:custom_call_target_registry",
+        "@xla//xla/ffi/api:c_api",
+        "@xla//xla/ffi/api:ffi",
+        "@xla//xla/service:custom_call_target_registry",
     ],
     alwayslink = 1,
 )

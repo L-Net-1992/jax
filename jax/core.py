@@ -13,192 +13,225 @@
 # limitations under the License.
 
 # Note: import <name> as <name> is required for names to be exported.
-# See PEP 484 & https://github.com/google/jax/issues/7570
-
-from __future__ import annotations
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
 
 from jax._src.core import (
   AbstractToken as AbstractToken,
   AbstractValue as AbstractValue,
   Atom as Atom,
-  AxisSize as AxisSize,
   CallPrimitive as CallPrimitive,
-  ClosedJaxpr as ClosedJaxpr,
-  ConcreteArray as ConcreteArray,
-  ConcretizationTypeError as ConcretizationTypeError,
   DShapedArray as DShapedArray,
-  DimSize as DimSize,
   DropVar as DropVar,
   Effect as Effect,
   Effects as Effects,
-  EvalTrace as EvalTrace,
-  InDBIdx as InDBIdx,
+  get_opaque_trace_state as get_opaque_trace_state,
   InconclusiveDimensionOperation as InconclusiveDimensionOperation,
-  InputType as InputType,
-  Jaxpr as Jaxpr,
-  JaxprEqn as JaxprEqn,
+  JaxprDebugInfo as JaxprDebugInfo,
   JaxprPpContext as JaxprPpContext,
   JaxprPpSettings as JaxprPpSettings,
   JaxprTypeError as JaxprTypeError,
-  Literal as Literal,
-  MainTrace as MainTrace,
-  MapPrimitive as MapPrimitive,
-  NameGatheringSubst as NameGatheringSubst,
-  NamedShape as NamedShape,
-  OpaqueDType as OpaqueDType,
-  OutDBIdx as OutDBIdx,
+  nonempty_axis_env as nonempty_axis_env_DO_NOT_USE,  # noqa: F401
   OutputType as OutputType,
   ParamDict as ParamDict,
-  Primitive as Primitive,
-  Shape as Shape,
   ShapedArray as ShapedArray,
-  Sublevel as Sublevel,
-  TRACER_LEAK_DEBUGGER_WARNING as TRACER_LEAK_DEBUGGER_WARNING,
-  ThreadLocalState as ThreadLocalState,
-  Token as Token,
   Trace as Trace,
-  TraceStack as TraceStack,
-  TraceState as TraceState,
   Tracer as Tracer,
-  TracerArrayConversionError as TracerArrayConversionError,
-  TracerIntegerConversionError as TracerIntegerConversionError,
-  UnexpectedTracerError as UnexpectedTracerError,
+  unsafe_am_i_under_a_jit as unsafe_am_i_under_a_jit_DO_NOT_USE,  # noqa: F401
+  unsafe_am_i_under_a_vmap as unsafe_am_i_under_a_vmap_DO_NOT_USE,  # noqa: F401
+  unsafe_get_axis_names as unsafe_get_axis_names_DO_NOT_USE,  # noqa: F401
   UnshapedArray as UnshapedArray,
   Value as Value,
-  Var as Var,
   abstract_token as abstract_token,
-  apply_todos as apply_todos,
-  as_hashable_function as as_hashable_function,
-  as_named_shape as as_named_shape,
   aval_mapping_handlers as aval_mapping_handlers,
-  axis_frame as axis_frame,
   call as call,
-  call_bind_with_continuation as call_bind_with_continuation,
   call_impl as call_impl,
-  call_p as call_p,
-  canonicalize_dim as canonicalize_dim,
-  canonicalize_shape as canonicalize_shape,
-  check_eqn as check_eqn,
   check_jaxpr as check_jaxpr,
-  check_type as check_type,
-  check_valid_jaxtype as check_valid_jaxtype,
-  closed_call_p as closed_call_p,
-  collections as collections,
-  concrete_aval as concrete_aval,
   concrete_or_error as concrete_or_error,
   concretization_function_error as concretization_function_error,
-  cur_sublevel as cur_sublevel,
   custom_typechecks as custom_typechecks,
-  dedup_referents as dedup_referents,
-  diff_dim as diff_dim,
-  diff_shape as diff_shape,
-  dilate_dim as dilate_dim,
-  dilate_shape as dilate_shape,
-  dimension_as_value as dimension_as_value,
-  divide_shape_sizes as divide_shape_sizes,
-  do_subst_axis_names_jaxpr as do_subst_axis_names_jaxpr,
-  dtypes as dtypes,
   ensure_compile_time_eval as ensure_compile_time_eval,
-  escaped_tracer_error as escaped_tracer_error,
   eval_context as eval_context,
   eval_jaxpr as eval_jaxpr,
-  extend_axis_env as extend_axis_env,
-  extend_axis_env_nd as extend_axis_env_nd,
   find_top_trace as find_top_trace,
-  full_lower as full_lower,
   gensym as gensym,
   get_aval as get_aval,
-  get_referent as get_referent,
-  greater_equal_dim as greater_equal_dim,
-  greater_equal_shape as greater_equal_shape,
-  has_opaque_dtype as has_opaque_dtype,
+  is_concrete as is_concrete,
   is_constant_dim as is_constant_dim,
   is_constant_shape as is_constant_shape,
-  is_dim as is_dim,
-  is_empty_shape as is_empty_shape,
-  is_opaque_dtype as is_opaque_dtype,
-  is_special_dim_size as is_special_dim_size,
-  jaxpr_as_fun as jaxpr_as_fun,
-  jaxpr_uses_outfeed as jaxpr_uses_outfeed,
   jaxprs_in_params as jaxprs_in_params,
-  join_effects as join_effects,
-  join_named_shapes as join_named_shapes,
-  lattice_join as lattice_join,
-  leaked_tracer_error as leaked_tracer_error,
   literalable_types as literalable_types,
-  lu as lu,
-  map as map,
-  map_bind as map_bind,
-  map_bind_with_continuation as map_bind_with_continuation,
   mapped_aval as mapped_aval,
-  maybe_find_leaked_tracers as maybe_find_leaked_tracers,
-  namedtuple as namedtuple,
-  new_base_main as new_base_main,
+  max_dim as max_dim,
+  min_dim as min_dim,
   new_jaxpr_eqn as new_jaxpr_eqn,
-  new_main as new_main,
-  new_sublevel as new_sublevel,
   no_axis_name as no_axis_name,
   no_effects as no_effects,
-  opaque_dtypes as opaque_dtypes,
-  outfeed_primitives as outfeed_primitives,
-  partial as partial,
-  pp as pp,
-  pp_aval as pp_aval,
-  pp_eqn as pp_eqn,
-  pp_eqn_rules as pp_eqn_rules,
-  pp_eqns as pp_eqns,
-  pp_jaxpr as pp_jaxpr,
-  pp_jaxpr_eqn_range as pp_jaxpr_eqn_range,
-  pp_jaxpr_skeleton as pp_jaxpr_skeleton,
-  pp_jaxprs as pp_jaxprs,
-  pp_kv_pair as pp_kv_pair,
-  pp_kv_pairs as pp_kv_pairs,
-  pp_var as pp_var,
-  pp_vars as pp_vars,
   primal_dtype_to_tangent_dtype as primal_dtype_to_tangent_dtype,
-  primitive_uses_outfeed as primitive_uses_outfeed,
-  process_env_traces_call as process_env_traces_call,
-  process_env_traces_map as process_env_traces_map,
   pytype_aval_mappings as pytype_aval_mappings,
-  raise_as_much_as_possible as raise_as_much_as_possible,
-  raise_to_shaped as raise_to_shaped,
-  raise_to_shaped_mappings as raise_to_shaped_mappings,
-  ref as ref,
-  reset_trace_state as reset_trace_state,
-  safe_map as safe_map,
-  safe_zip as safe_zip,
-  same_referent as same_referent,
-  same_shape_sizes as same_shape_sizes,
-  source_info_util as source_info_util,
-  stash_axis_env as stash_axis_env,
-  str_eqn_compact as str_eqn_compact,
-  stride_dim as stride_dim,
-  stride_shape as stride_shape,
+  set_current_trace as set_current_trace,
   subjaxprs as subjaxprs,
-  subst_axis_names as subst_axis_names,
-  subst_axis_names_eqn as subst_axis_names_eqn,
-  subst_axis_names_jaxpr as subst_axis_names_jaxpr,
-  subst_axis_names_var as subst_axis_names_var,
-  substitute_vars_in_output_ty as substitute_vars_in_output_ty,
-  sum_dim as sum_dim,
-  sum_shapes as sum_shapes,
-  symbolic_equal_dim as symbolic_equal_dim,
-  symbolic_equal_one_of_dim as symbolic_equal_one_of_dim,
-  symbolic_equal_shape as symbolic_equal_shape,
-  thread_local_state as thread_local_state,
-  token as token,
-  total_ordering as total_ordering,
-  trace_state_clean as trace_state_clean,
-  traceback_util as traceback_util,
+  take_current_trace as take_current_trace,
+  trace_ctx as trace_ctx,
+  TraceTag as TraceTag,
   traverse_jaxpr_params as traverse_jaxpr_params,
-  tuple_delete as tuple_delete,
-  tuple_insert as tuple_insert,
-  typecheck as typecheck,
-  typecompat as typecompat,
-  typematch as typematch,
   unmapped_aval as unmapped_aval,
-  used_axis_names as used_axis_names,
-  used_axis_names_jaxpr as used_axis_names_jaxpr,
   valid_jaxtype as valid_jaxtype,
-  zip as zip,
 )
+
+
+from jax._src import core as _src_core
+_deprecations = {
+    # Added 2024-12-16
+    "ClosedJaxpr": ("jax.core.ClosedJaxpr is deprecated. Use jax.extend.core.ClosedJaxpr instead, "
+                    "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+                    _src_core.ClosedJaxpr),
+    "Jaxpr": ("jax.core.Jaxpr is deprecated. Use jax.extend.core.Jaxpr instead, "
+              "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+              _src_core.Jaxpr),
+    "JaxprEqn": ("jax.core.JaxprEqn is deprecated. Use jax.extend.core.JaxprEqn instead, "
+                 "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+                 _src_core.JaxprEqn),
+    "Literal": ("jax.core.Literal is deprecated. Use jax.extend.core.Literal instead, "
+                "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+                _src_core.Literal),
+    "Primitive": ("jax.core.Primitive is deprecated. Use jax.extend.core.Primitive instead, "
+                  "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+                  _src_core.Primitive),
+    "Token": ("jax.core.Token is deprecated. Use jax.extend.core.Token instead, "
+              "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+              _src_core.Token),
+    "Var": ("jax.core.Var is deprecated. Use jax.extend.core.Var instead, "
+            "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+            _src_core.Var),
+    # Added 2024-12-11
+    "axis_frame": ("jax.core.axis_frame is deprecated.", _src_core.axis_frame),
+    "AxisName": ("jax.core.AxisName is deprecated.", _src_core.AxisName),
+    "AxisSize": ("jax.core.AxisSize is deprecated.", _src_core.AxisSize),
+    "ConcretizationTypeError": ("jax.core.ConcretizationTypeError is deprecated; "
+                                "use jax.errors.ConcretizationTypeError.",
+                                _src_core.ConcretizationTypeError),
+    "EvalTrace": ("jax.core.EvalTrace is deprecated.", _src_core.EvalTrace),
+    "InDBIdx": ("jax.core.InDBIdx is deprecated.", _src_core.InDBIdx),
+    "InputType": ("jax.core.InputType is deprecated.", _src_core.InputType),
+    "MapPrimitive": ("jax.core.MapPrimitive is deprecated.", _src_core.MapPrimitive),
+    "OpaqueTraceState": ("jax.core.OpaqueTraceState is deprecated.", _src_core.OpaqueTraceState),
+    "OutDBIdx": ("jax.core.OutDBIdx is deprecated.", _src_core.OutDBIdx),
+    "TRACER_LEAK_DEBUGGER_WARNING": ("jax.core.TRACER_LEAK_DEBUGGER_WARNING is deprecated.",
+                                     _src_core.TRACER_LEAK_DEBUGGER_WARNING),
+    "call_p": ("jax.core.call_p is deprecated. Use jax.extend.core.primitives.call_p",
+               _src_core.call_p),
+    "closed_call_p": ("jax.core.closed_call_p is deprecated. Use jax.extend.core.primitives.closed_call_p",
+                      _src_core.closed_call_p),
+    "concrete_aval": ("jax.core.concrete_aval is deprecated.", _src_core.abstractify),
+    "dedup_referents": ("jax.core.dedup_referents is deprecated.", _src_core.dedup_referents),
+    "escaped_tracer_error": ("jax.core.escaped_tracer_error is deprecated.",
+                             _src_core.escaped_tracer_error),
+    "extend_axis_env_nd": ("jax.core.extend_axis_env_nd is deprecated.",
+                           _src_core.extend_axis_env_nd),
+    "get_type": ("jax.core.get_type is deprecated.", _src_core.get_aval),
+    "get_referent": ("jax.core.get_referent is deprecated.", _src_core.get_referent),
+    "join_effects": ("jax.core.join_effects is deprecated.", _src_core.join_effects),
+    "leaked_tracer_error": ("jax.core.leaked_tracer_error is deprecated.",
+                            _src_core.leaked_tracer_error),
+    "maybe_find_leaked_tracers": ("jax.core.maybe_find_leaked_tracers is deprecated.",
+                                  _src_core.maybe_find_leaked_tracers),
+    "raise_to_shaped_mappings": ("jax.core.raise_to_shaped_mappings is deprecated."
+                                 " It is unused as of jax v0.4.36.",
+                                 _src_core.raise_to_shaped_mappings),
+    "reset_trace_state": ("jax.core.reset_trace_state is deprecated.",
+                          _src_core.reset_trace_state),
+    "str_eqn_compact": ("jax.core.str_eqn_compact is deprecated.", _src_core.str_eqn_compact),
+    "substitute_vars_in_output_ty": ("jax.core.substitute_vars_in_output_ty is deprecated.",
+                                     _src_core.substitute_vars_in_output_ty),
+    "trace_state_clean": ("jax.core.trace_state_clean is deprecated.",
+                          _src_core.trace_state_clean),
+    "typecheck": ("jax.core.typecheck is deprecated.", _src_core.typecheck),
+    "typecompat": ("jax.core.typecompat is deprecated.", _src_core.typecompat),
+    "typematch": ("jax.core.typematch is deprecated.", _src_core.typematch),
+    "used_axis_names_jaxpr": ("jax.core.used_axis_names_jaxpr is deprecated.",
+                              _src_core.used_axis_names_jaxpr),
+    # Added 2024-12-10
+    "full_lower": ("jax.core.full_lower is deprecated. It is a no-op as of JAX v0.4.36.",
+                   _src_core.full_lower),
+    "jaxpr_as_fun": ("jax.core.jaxpr_as_fun is deprecated. Use jax.extend.core.jaxpr_as_fun instead, "
+                     "and see https://jax.readthedocs.io/en/latest/jax.extend.html for details.",
+                     _src_core.jaxpr_as_fun),
+    "lattice_join": ("jax.core.lattice_join is deprecated. It is a no-op as of JAX v0.4.36.",
+                     _src_core.lattice_join),
+    "raise_to_shaped": ("jax.core.raise_to_shaped is deprecated. It is a no-op as of JAX v0.4.36.",
+                        _src_core.raise_to_shaped),
+    # Finalized 2024-12-11; remove after 2025-3-11
+    "check_eqn": ("jax.core.check_eqn was removed in JAX v0.4.38.", None),
+    "check_type": ("jax.core.check_type was removed in JAX v0.4.38.", None),
+    "check_valid_jaxtype": (
+      ("jax.core.check_valid_jaxtype was removed in JAX v0.4.38. Instead, you can manually"
+       " raise an error if core.valid_jaxtype() returns False."),
+      None),
+    "non_negative_dim": (
+      "jax.core.non_negative_dim was removed in JAX v0.4.38. Use max_dim(..., 0).", None,
+    ),
+    # Finalized 2024-09-25; remove after 2024-12-25
+    "pp_aval": ("jax.core.pp_aval was removed in JAX v0.4.34.", None),
+    "pp_eqn": ("jax.core.pp_eqn was removed in JAX v0.4.34.", None),
+    "pp_eqn_rules": ("jax.core.pp_eqn_rules was removed in JAX v0.4.34.", None),
+    "pp_eqns": ("jax.core.pp_eqns was removed in JAX v0.4.34.", None),
+    "pp_jaxpr": ("jax.core.pp_jaxpr was removed in JAX v0.4.34.", None),
+    "pp_jaxpr_eqn_range": ("jax.core.pp_jaxpr_eqn_range was removed in JAX v0.4.34.", None),
+    "pp_jaxpr_skeleton": ("jax.core.pp_jaxpr_skeleton was removed in JAX v0.4.34.", None),
+    "pp_jaxprs": ("jax.core.pp_jaxprs was removed in JAX v0.4.34.", None),
+    "pp_kv_pair": ("jax.core.pp_kv_pair was removed in JAX v0.4.34.", None),
+    "pp_kv_pairs": ("jax.core.pp_kv_pairs was removed in JAX v0.4.34.", None),
+    "pp_var": ("jax.core.pp_var was removed in JAX v0.4.34.", None),
+    "pp_vars": ("jax.core.pp_vars was removed in JAX v0.4.34.", None),
+}
+
+import typing
+if typing.TYPE_CHECKING:
+  AxisName = _src_core.AxisName
+  AxisSize = _src_core.AxisSize
+  ClosedJaxpr = _src_core.ClosedJaxpr
+  ConcretizationTypeError = _src_core.ConcretizationTypeError
+  EvalTrace = _src_core.EvalTrace
+  InDBIdx = _src_core.InDBIdx
+  InputType = _src_core.InputType
+  Jaxpr = _src_core.Jaxpr
+  JaxprEqn = _src_core.JaxprEqn
+  Literal = _src_core.Literal
+  MapPrimitive = _src_core.MapPrimitive
+  OpaqueTraceState = _src_core.OpaqueTraceState
+  OutDBIdx = _src_core.OutDBIdx
+  Primitive = _src_core.Primitive
+  Token = _src_core.Token
+  TRACER_LEAK_DEBUGGER_WARNING = _src_core.TRACER_LEAK_DEBUGGER_WARNING
+  Var = _src_core.Var
+  axis_frame = _src_core.axis_frame
+  call_p = _src_core.call_p
+  closed_call_p = _src_core.closed_call_p
+  concrete_aval = _src_core.abstractify
+  dedup_referents = _src_core.dedup_referents
+  escaped_tracer_error = _src_core.escaped_tracer_error
+  extend_axis_env_nd = _src_core.extend_axis_env_nd
+  full_lower = _src_core.full_lower
+  get_type = _src_core.get_aval
+  get_referent = _src_core.get_referent
+  jaxpr_as_fun = _src_core.jaxpr_as_fun
+  join_effects = _src_core.join_effects
+  lattice_join = _src_core.lattice_join
+  leaked_tracer_error = _src_core.leaked_tracer_error
+  maybe_find_leaked_tracers = _src_core.maybe_find_leaked_tracers
+  raise_to_shaped = _src_core.raise_to_shaped
+  raise_to_shaped_mappings = _src_core.raise_to_shaped_mappings
+  reset_trace_state = _src_core.reset_trace_state
+  str_eqn_compact = _src_core.str_eqn_compact
+  substitute_vars_in_output_ty = _src_core.substitute_vars_in_output_ty
+  trace_state_clean = _src_core.trace_state_clean
+  typecheck = _src_core.typecheck
+  typecompat = _src_core.typecompat
+  typematch = _src_core.typematch
+  used_axis_names_jaxpr = _src_core.used_axis_names_jaxpr
+else:
+  from jax._src.deprecations import deprecation_getattr as _deprecation_getattr
+  __getattr__ = _deprecation_getattr(__name__, _deprecations)
+  del _deprecation_getattr
+del typing
+del _src_core

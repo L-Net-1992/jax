@@ -12,17 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl.testing import absltest
-
 import os
 import gzip
 import json
 
+from absl.testing import absltest
+
 import jax
-from jax import jaxpr_util, jit, make_jaxpr, numpy as jnp
-from jax._src.lib import xla_client
+from jax import jit, make_jaxpr, numpy as jnp
+from jax._src import config
+from jax._src import jaxpr_util
 from jax._src import test_util as jtu
-from jax.config import config
+from jax._src.lib import xla_client
 
 
 config.parse_flags_with_absl()
@@ -38,10 +39,7 @@ class JaxprStatsTest(jtu.JaxTestCase):
     hist = jaxpr_util.primitives(make_jaxpr(f)(1., 1.).jaxpr)
 
     primitives = ['add', 'sin', 'cos']
-    if jax.config.jax_jit_pjit_api_merge:
-      primitives.append('pjit')
-    else:
-      primitives.append('xla_call')
+    primitives.append('pjit')
     for k in primitives:
       assert k in hist, k
     self.assertEqual(hist['sin'], 2)
@@ -63,24 +61,21 @@ class JaxprStatsTest(jtu.JaxTestCase):
   def test_primitives_by_shape(self):
     def f(x, y):
       def sub(x, y):
-        return jnp.sum(jnp.array([x, y])), y
-      s, _ = jit(sub)(x, y)
+        return jnp.sum(jnp.array([x, y]))
+      s = jit(sub)(x, y)
       return jnp.sin(s) + jnp.cos(y)
 
     hist = jaxpr_util.primitives_by_shape(make_jaxpr(f)(1., 1.).jaxpr)
 
-    t = '64' if config.x64_enabled else '32'
+    t = '64' if config.enable_x64.value else '32'
     shapes = [
         f'add :: float{t}[]',
         f'sin :: float{t}[]',
         f'cos :: float{t}[]',
         f'reduce_sum :: float{t}[]',
         f'concatenate :: float{t}[2]',
+        f'pjit :: float{t}[]',
     ]
-    if jax.config.jax_jit_pjit_api_merge:
-      shapes.append(f'pjit :: float{t}[] *')
-    else:
-      shapes.append(f'xla_call :: float{t}[] *')
     for k in shapes:
       self.assertEqual(hist[k], 1)
 

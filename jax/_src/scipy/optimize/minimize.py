@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Callable, Mapping, Optional, Tuple, Union
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import jax
 from jax._src.scipy.optimize.bfgs import minimize_bfgs
@@ -37,24 +41,24 @@ class OptimizeResults(NamedTuple):
     nit: integer number of iterations of the optimization algorithm.
   """
   x: jax.Array
-  success: Union[bool, jax.Array]
-  status: Union[int, jax.Array]
+  success: bool | jax.Array
+  status: int | jax.Array
   fun: jax.Array
   jac: jax.Array
-  hess_inv: Optional[jax.Array]
-  nfev: Union[int, jax.Array]
-  njev: Union[int, jax.Array]
-  nit: Union[int, jax.Array]
+  hess_inv: jax.Array | None
+  nfev: int | jax.Array
+  njev: int | jax.Array
+  nit: int | jax.Array
 
 
 def minimize(
     fun: Callable,
     x0: jax.Array,
-    args: Tuple = (),
+    args: tuple = (),
     *,
     method: str,
-    tol: Optional[float] = None,
-    options: Optional[Mapping[str, Any]] = None,
+    tol: float | None = None,
+    options: Mapping[str, Any] | None = None,
 ) -> OptimizeResults:
   """Minimization of scalar function of one or more variables.
 
@@ -116,7 +120,7 @@ def minimize(
 
   if method.lower() == 'l-bfgs-experimental-do-not-rely-on-this':
     results = _minimize_lbfgs(fun_with_args, x0, **options)
-    success = results.converged & (~results.failed)
+    success = results.converged & jnp.logical_not(results.failed)
     return OptimizeResults(x=results.x_k,
                            success=success,
                            status=results.status,

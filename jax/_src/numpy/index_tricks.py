@@ -12,16 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import abc
-from typing import Any, Iterable, List, Tuple, Union
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any, Union
 
 import jax
-import jax._src.numpy.lax_numpy as jnp
 from jax._src import core
-from jax._src.numpy.util import _promote_dtypes
+from jax._src.numpy.util import promote_dtypes
+from jax._src.numpy.lax_numpy import (
+  arange, array, concatenate, expand_dims, linspace, meshgrid, stack, transpose
+)
 from jax._src.typing import Array, ArrayLike
+from jax._src.util import set_module
 
 import numpy as np
+
+
+export = set_module('jax.numpy')
 
 
 __all__ = ["c_", "index_exp", "mgrid", "ogrid", "r_", "s_"]
@@ -35,33 +43,14 @@ def _make_1d_grid_from_slice(s: slice, op_name: str) -> Array:
   step = core.concrete_or_error(None, s.step,
                                 f"slice step of jnp.{op_name}") or 1
   if np.iscomplex(step):
-    newobj = jnp.linspace(start, stop, int(abs(step)))
+    newobj = linspace(start, stop, int(abs(step)))
   else:
-    newobj = jnp.arange(start, stop, step)
+    newobj = arange(start, stop, step)
 
   return newobj
 
 
-class _IndexGrid(abc.ABC):
-  """Creates multi-dimensional grids of indices."""
-  sparse: bool
-  op_name: str
-
-  def __getitem__(self, key: Union[slice, Tuple[slice, ...]]) -> Union[Array, List[Array]]:
-    if isinstance(key, slice):
-      return _make_1d_grid_from_slice(key, op_name=self.op_name)
-    output: Iterable[Array] = (_make_1d_grid_from_slice(k, op_name=self.op_name) for k in key)
-    with jax.numpy_dtype_promotion('standard'):
-      output = _promote_dtypes(*output)
-    output_arr = jnp.meshgrid(*output, indexing='ij', sparse=self.sparse)
-    if self.sparse:
-      return output_arr
-    if len(output_arr) == 0:
-      return jnp.arange(0)
-    return jnp.stack(output_arr, 0)
-
-
-class _Mgrid(_IndexGrid):
+class _Mgrid:
   """Return dense multi-dimensional "meshgrid".
 
   LAX-backend implementation of :obj:`numpy.mgrid`. This is a convenience wrapper for
@@ -89,14 +78,23 @@ class _Mgrid(_IndexGrid):
            [[0, 1, 2],
             [0, 1, 2]]], dtype=int32)
   """
-  sparse = False
-  op_name = "mgrid"
+
+  def __getitem__(self, key: slice | tuple[slice, ...]) -> Array:
+    if isinstance(key, slice):
+      return _make_1d_grid_from_slice(key, op_name="mgrid")
+    output: Iterable[Array] = (_make_1d_grid_from_slice(k, op_name="mgrid") for k in key)
+    with jax.numpy_dtype_promotion('standard'):
+      output = promote_dtypes(*output)
+    output_arr = meshgrid(*output, indexing='ij', sparse=False)
+    if len(output_arr) == 0:
+      return arange(0)
+    return stack(output_arr, 0)
 
 
-mgrid = _Mgrid()
+mgrid = export(_Mgrid())
 
 
-class _Ogrid(_IndexGrid):
+class _Ogrid:
   """Return open multi-dimensional "meshgrid".
 
   LAX-backend implementation of :obj:`numpy.ogrid`. This is a convenience wrapper for
@@ -123,25 +121,33 @@ class _Ogrid(_IndexGrid):
             [1]], dtype=int32),
      Array([[0, 1, 2]], dtype=int32)]
   """
-  sparse = True
-  op_name = "ogrid"
+
+  def __getitem__(
+      self, key: slice | tuple[slice, ...]
+  ) -> Array | list[Array]:
+    if isinstance(key, slice):
+      return _make_1d_grid_from_slice(key, op_name="ogrid")
+    output: Iterable[Array] = (_make_1d_grid_from_slice(k, op_name="ogrid") for k in key)
+    with jax.numpy_dtype_promotion('standard'):
+      output = promote_dtypes(*output)
+    return meshgrid(*output, indexing='ij', sparse=True)
 
 
-ogrid = _Ogrid()
+ogrid = export(_Ogrid())
 
 
 _IndexType = Union[ArrayLike, str, slice]
 
 
-class _AxisConcat(abc.ABC):
+class _AxisConcat:
   """Concatenates slices, scalars and array-like objects along a given axis."""
   axis: int
   ndmin: int
   trans1d: int
   op_name: str
 
-  def __getitem__(self, key: Union[_IndexType, Tuple[_IndexType, ...]]) -> Array:
-    key_tup: Tuple[_IndexType, ...] = key if isinstance(key, tuple) else (key,)
+  def __getitem__(self, key: _IndexType | tuple[_IndexType, ...]) -> Array:
+    key_tup: tuple[_IndexType, ...] = key if isinstance(key, tuple) else (key,)
 
     params = [self.axis, self.ndmin, self.trans1d, -1]
 
@@ -154,7 +160,7 @@ class _AxisConcat(abc.ABC):
       elif directive == "c":
         params[-1] = 1
       else:
-        vec: List[Any] = directive.split(",")
+        vec: list[Any] = directive.split(",")
         k = len(vec)
         if k < 4:
           vec += params[k:]
@@ -178,10 +184,10 @@ class _AxisConcat(abc.ABC):
       elif isinstance(item, str):
         raise ValueError("string directive must be placed at the beginning")
       else:
-        newobj = jnp.array(item, copy=False)
+        newobj = array(item, copy=False)
         item_ndim = newobj.ndim
 
-      newobj = jnp.array(newobj, copy=False, ndmin=ndmin)
+      newobj = array(newobj, copy=False, ndmin=ndmin)
 
       if trans1d != -1 and ndmin - item_ndim > 0:
         shape_obj = tuple(range(ndmin))
@@ -189,15 +195,15 @@ class _AxisConcat(abc.ABC):
         num_lshifts = ndmin - abs(ndmin + trans1d + 1) % ndmin
         shape_obj = tuple(shape_obj[num_lshifts:] + shape_obj[:num_lshifts])
 
-        newobj = jnp.transpose(newobj, shape_obj)
+        newobj = transpose(newobj, shape_obj)
 
       output.append(newobj)
 
-    res = jnp.concatenate(tuple(output), axis=axis)
+    res = concatenate(tuple(output), axis=axis)
 
     if matrix != -1 and res.ndim == 1:
       # insert 2nd dim at axis 0 or 1
-      res = jnp.expand_dims(res, matrix)
+      res = expand_dims(res, matrix)
 
     return res
 
@@ -277,7 +283,7 @@ class RClass(_AxisConcat):
   op_name = "r_"
 
 
-r_ = RClass()
+r_ = export(RClass())
 
 
 class CClass(_AxisConcat):
@@ -325,7 +331,7 @@ class CClass(_AxisConcat):
   op_name = "c_"
 
 
-c_ = CClass()
+c_ = export(CClass())
 
 s_ = np.s_
 

@@ -11,144 +11,172 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import collections
+import contextlib
 import functools
-import textwrap
+import logging
+import time
 import unittest
 
-from typing import Any, Callable, Sequence
-
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 from jax import lax
-from jax import tree_util
+from jax._src import config
 from jax._src import core
-from jax._src import debugging
 from jax._src import dispatch
-from jax._src import effects
-from jax._src import sharding
 from jax._src import test_util as jtu
 from jax._src import util
-from jax._src import xla_bridge
-from jax._src.lib import xla_client
-from jax.config import config
-from jax.experimental import maps
-from jax.experimental import pjit
-from jax.interpreters import mlir
-from jax.experimental.maps import xmap
 from jax.experimental import io_callback
+from jax.experimental import pjit
+from jax.experimental.shard_map import shard_map
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
 
-
 config.parse_flags_with_absl()
-
-debug_print = debugging.debug_print
-
-
-def _format_multiline(text):
-  return textwrap.dedent(text).lstrip()
-
-
-prev_xla_flags = None
-
-
-def setUpModule():
-  global prev_xla_flags
-  # This will control the CPU devices. On TPU we always have 2 devices
-  prev_xla_flags = jtu.set_host_platform_device_count(2)
-
-
-# Reset to previous configuration in case other test modules will be run.
-def tearDownModule():
-  prev_xla_flags()
-
-
-callback_p = core.Primitive("callback")
-callback_p.multiple_results = True
+jtu.request_cpu_devices(2)
 
 map, unsafe_map = util.safe_map, map
 
-
-@callback_p.def_impl
-def callback_impl(*args, callback: Callable[..., Any], result_avals,
-                  effect: debugging.DebugEffect):
-  del result_avals, effect
-  return callback(*args)
-
-
-@callback_p.def_effectful_abstract_eval
-def callback_abstract_eval(*flat_avals, callback: Callable[..., Any],
-                           effect: debugging.DebugEffect,
-                           result_avals: Sequence[core.ShapedArray]):
-  del flat_avals, callback
-  return result_avals, {effect}
+# Some test methods take a kwarg
+# callback=[io_callback(ordered=True) | io_callback(ordered=False) | pure_callback]
+io_callback_ordered = functools.partial(io_callback, ordered=True)
+io_calback_unordered = functools.partial(io_callback, ordered=False)
+with_pure_and_io_callbacks = parameterized.named_parameters(
+  dict(testcase_name=flavor,
+       callback=dict(io_unordered=io_calback_unordered,
+                     io_ordered=io_callback_ordered,
+                     pure=jax.pure_callback)[flavor])
+  for flavor in ("io_unordered", "io_ordered", "pure")
+)
 
 
-def callback(f, result_shape, *args, ordered: bool = False, **kwargs):
-  flat_result_shapes, out_tree = tree_util.tree_flatten(result_shape)
-  flat_args, in_tree = tree_util.tree_flatten((args, kwargs))
-  flat_result_avals = [
-      core.ShapedArray(s.shape, s.dtype) for s in flat_result_shapes
-  ]
-  effect = (
-      debugging.ordered_debug_effect if ordered else debugging.debug_effect)
-  flat_args, in_tree = tree_util.tree_flatten((args, kwargs))
-  def _flat_callback(*flat_args):
-    args, kwargs = tree_util.tree_unflatten(in_tree, flat_args)
-    return tree_util.tree_leaves(f(*args, **kwargs))
-  out_flat = callback_p.bind(
-      *flat_args,
-      callback=_flat_callback,
-      effect=effect,
-      result_avals=flat_result_avals)
-  return tree_util.tree_unflatten(out_tree, out_flat)
-
-
-def callback_lowering(ctx, *args, effect, callback, **params):
-
-  def _callback(*flat_args):
-    return tuple(
-        callback_p.impl(*flat_args, effect=effect, callback=callback, **params))
-
-  if effects.ordered_effects.contains(effect):
-    token = ctx.tokens_in.get(effect)[0]
-    result, token, keepalive = mlir.emit_python_callback(
-        ctx, _callback, token, list(args), ctx.avals_in, ctx.avals_out, True)
-    ctx.set_tokens_out(mlir.TokenSet({effect: (token,)}))
-  else:
-    result, token, keepalive = mlir.emit_python_callback(
-        ctx, _callback, None, list(args), ctx.avals_in, ctx.avals_out, True)
-  ctx.module_context.add_keepalive(keepalive)
-  return result
-
-
-mlir.register_lowering(callback_p, callback_lowering, platform="cpu")
-mlir.register_lowering(callback_p, callback_lowering, platform="gpu")
-mlir.register_lowering(callback_p, callback_lowering, platform="tpu")
-
-
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
 class PythonCallbackTest(jtu.JaxTestCase):
+
+  def setUp(self):
+    super().setUp()
+    if not jtu.test_device_matches(["cpu", "gpu", "tpu"]):
+      self.skipTest(f"Host callback not supported on {jtu.device_under_test()}")
 
   def tearDown(self):
     super().tearDown()
     dispatch.runtime_tokens.clear()
 
-  def test_callback_with_scalar_values(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
+  @with_pure_and_io_callbacks
+  def test_callback_with_scalar_values(self, *, callback):
     @jax.jit
     def f(x):
-      return callback(lambda x: x + np.float32(1.),
-                      core.ShapedArray(x.shape, x.dtype), x)
+      return callback(lambda x: x + 1.0, core.ShapedArray(x.shape, x.dtype), x)
 
     out = f(0.)
     self.assertEqual(out, 1.)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f"{flavor}_expect_dtype_{expect_dtype}",
+          callback=dict(
+              io_unordered=io_calback_unordered,
+              io_ordered=io_callback_ordered,
+              pure=jax.pure_callback,
+          )[flavor],
+          expect_dtype=expect_dtype,
+      )
+      for flavor in ("io_unordered", "io_ordered", "pure")
+      for expect_dtype in (np.int32, np.int64, np.float32, np.float64)
+  )
+  def test_callback_returning_python_literal(self, *, callback, expect_dtype):
+    returned_literal = 42 if expect_dtype in (np.int32, np.int64) else 42.0
 
-  def test_callback_with_wrong_number_of_args(self):
+    @jax.jit
+    def f(x):
+      return callback(
+          lambda x: returned_literal, core.ShapedArray((), expect_dtype), x
+      )
+
+    if not config.enable_x64.value and expect_dtype in (np.int64, np.float64):
+      ctx = self.assertRaisesRegex(Exception, "result_shape_dtypes cannot specify 64-bit types")
+    elif config.enable_x64.value and expect_dtype in (np.int32, np.float32):
+      ctx = self.assertRaisesRegex(Exception, "Incorrect output dtype for return value")
+    else:
+      ctx = contextlib.nullcontext()
+
+    with ctx:
+      out = f(0.0)
+      jax.effects_barrier()
+      self.assertEqual(out, returned_literal)
+
+  @with_pure_and_io_callbacks
+  def test_callback_returning_custom_array(self, *, callback):
+    # Some users write the callback in TF, returning a tf.Tensor. We don't
+    # want to add TF as a dependency, but simulate that use case with a
+    # custom array class.
+    class CustomArray:
+
+      def __init__(self, a: np.ndarray):
+        self.a = a
+
+      @property
+      def shape(self):
+        return self.a.shape
+
+      @property
+      def dtype(self):
+        return self.a.dtype
+
+      def __array__(self):
+        return self.a
+
+    @jax.jit
+    def f(x):
+      return callback(
+          lambda x: CustomArray(np.array(42.0, dtype=np.float32)),
+          core.ShapedArray((), np.float32),
+          x,
+      )
+
+    out = f(0.0)
+    jax.effects_barrier()
+    self.assertEqual(out, 42.0)
+
+  @parameterized.named_parameters(
+    dict(testcase_name=f"{flavor}_{dtype}",
+         dtype=dtype,
+         callback=dict(io_unordered=io_calback_unordered,
+                       io_ordered=io_callback_ordered,
+                       pure=jax.pure_callback)[flavor])
+    for flavor in ("io_unordered", "io_ordered", "pure")
+    for dtype in jtu.dtypes.all
+  )
+  def test_callback_works_with_all_types(self, *, callback, dtype):
+    def host_func(x):
+      if dtype == np.bool_:
+        return ~ x
+      else:
+        return x + x
+    _received = None
+    def _cb(x):
+      nonlocal _received
+      _received = x
+      return host_func(x)
+
+    if dtype == np.bool_:
+      x = np.array([True, False, True, True], dtype=np.bool_)
+    else:
+      x = np.arange(4, dtype=dtype)
+    @jax.jit
+    def f(x):
+      return callback(_cb,
+                      core.ShapedArray(x.shape, x.dtype), x)
+
+    out = f(x)
+    self.assertAllClose(out, host_func(x))
+    jax.effects_barrier()
+    self.assertAllClose(_received, x)
+
+  @with_pure_and_io_callbacks
+  def test_callback_with_wrong_number_of_args(self, *, callback):
 
     @jax.jit
     def f():
@@ -160,28 +188,31 @@ class PythonCallbackTest(jtu.JaxTestCase):
       f()
       jax.effects_barrier()
 
-  def test_callback_with_wrong_number_of_returned_values(self):
+  @with_pure_and_io_callbacks
+  def test_callback_with_wrong_number_of_returned_values(self, *, callback):
 
     @jax.jit
-    def f():
-      # Calling a function with a return value that expects no return values
-      return callback(lambda: np.ones(4, np.float32), ())
+    def f(x):
+      # Calling a function with two return values that expects one return value
+      return callback(lambda x: (x, np.ones(4, np.float32)), x, x)
 
     with self.assertRaises(RuntimeError):
-      f()
+      f(2.)
       jax.effects_barrier()
 
     @jax.jit
     def g():
-      # Calling a function with a return value that expects no return values
-      return callback(lambda: None, (core.ShapedArray(
+      # Specifically for io_callback, calling a function with a return value
+      # that expects no return values
+      return io_callback(lambda: None, (core.ShapedArray(
           (1,), np.float32), core.ShapedArray((2,), np.float32)))
 
     with self.assertRaises(RuntimeError):
       g()
       jax.effects_barrier()
 
-  def test_callback_with_wrong_shape_outputs(self):
+  @with_pure_and_io_callbacks
+  def test_callback_with_wrong_shape_outputs(self, *, callback):
 
     @jax.jit
     def f():
@@ -193,7 +224,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
       f()
       jax.effects_barrier()
 
-  def test_callback_with_wrong_dtype_outputs(self):
+  @with_pure_and_io_callbacks
+  def test_callback_with_wrong_dtype_outputs(self, *, callback):
 
     def _cb():
       return np.array([1], np.float64)
@@ -203,13 +235,31 @@ class PythonCallbackTest(jtu.JaxTestCase):
       # Calling a function expected a f32 return value but getting f64
       return callback(_cb, core.ShapedArray((1,), np.float32))
 
-    with self.assertRaises(RuntimeError):
+    if config.enable_x64.value:
+      ctx = self.assertRaisesRegex(Exception, "Incorrect output dtype for return value")
+    else:
+      ctx = contextlib.nullcontext()
+    with ctx:
+      res = f()
+      jax.effects_barrier()
+      self.assertAllClose(res, np.array([1], np.float32))
+
+  @with_pure_and_io_callbacks
+  def test_callback_with_wrongly_specified_64_bit_dtype(self, *, callback):
+    if config.enable_x64.value:
+      raise unittest.SkipTest("Test only needed when 64-bit mode disabled.")
+
+    @jax.jit
+    def f():
+      return callback(lambda: np.float64(1.),
+                      core.ShapedArray((), np.float64))
+
+    with self.assertRaises(ValueError):
       f()
       jax.effects_barrier()
 
-  def test_callback_with_single_return_value(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_with_single_return_value(self, *, callback):
 
     @jax.jit
     def f():
@@ -220,9 +270,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     np.testing.assert_allclose(out, np.ones(4, np.float32))
 
-  def test_callback_with_multiple_return_values(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_with_multiple_return_values(self, *, callback):
 
     @jax.jit
     def f():
@@ -235,9 +284,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     np.testing.assert_allclose(x, np.ones(4, np.float32))
     np.testing.assert_allclose(y, np.ones(5, np.int32))
 
-  def test_callback_with_multiple_arguments_and_return_values(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_with_multiple_arguments_and_return_values(self, *, callback):
 
     def _callback(x, y, z):
       return (x, y + z)
@@ -248,31 +296,76 @@ class PythonCallbackTest(jtu.JaxTestCase):
           (3,), x.dtype), core.ShapedArray((3,), x.dtype)), x, y, z)
 
     x, y = f(jnp.ones(3), jnp.arange(3.), jnp.arange(3.) + 1.)
+    jax.effects_barrier()
     np.testing.assert_allclose(x, np.ones(3))
     np.testing.assert_allclose(y, np.array([1., 3., 5]))
 
-  def test_send_recv_zero_dim_arrays(self):
-
-    def _callback(x):
-      return x
+  @with_pure_and_io_callbacks
+  def test_send_zero_dim_arrays(self, *, callback):
+    result = np.full((2,), 42.0, dtype=np.float32)
+    x = np.zeros((2, 0), np.float32)
+    def _callback(x):  # x: f32[2, 0]
+      return result
 
     @jax.jit
     def f(x):
-      return callback(_callback, core.ShapedArray((0,), np.float32), x)
+      return callback(
+          _callback, core.ShapedArray(result.shape, result.dtype), x)
+    jax.effects_barrier()
+    self.assertAllClose(f(x), result)
 
-    if jax.default_backend() == "tpu":
-      with self.assertRaisesRegex(
-          NotImplementedError,
-          "Callbacks with zero-dimensional values not supported on TPU."):
-        f(jnp.zeros(0, jnp.float32))
-        jax.effects_barrier()
-    else:
-      np.testing.assert_allclose(
-          f(jnp.zeros(0, jnp.float32)), np.zeros(0, np.float32))
+  @with_pure_and_io_callbacks
+  def test_send_zero_dim_and_non_zero_dim_arrays(self, *, callback):
+    x = np.zeros((2, 0), np.float32)
+    y = np.full((2,), 42.0, dtype=np.float32)
+    result = y
+    def _callback(x, y):  # x: f32[2, 0]  y: f32[2]
+      return y
 
-  def test_callback_with_pytree_arguments_and_return_values(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+    @jax.jit
+    def f(x, y):
+      return callback(
+          _callback, core.ShapedArray(result.shape, result.dtype), x, y)
+    jax.effects_barrier()
+    self.assertAllClose(f(x, y), result)
+
+  @with_pure_and_io_callbacks
+  def test_recv_zero_dim_arrays(self, *, callback):
+    result = np.full((2, 0), 42.0, dtype=np.float32)
+    x = np.zeros((2,), np.float32)
+    def _callback(_):  # f32[2] -> f32[2, 0]
+      return result
+
+    @jax.jit
+    def f(x):
+      return callback(
+          _callback, core.ShapedArray(result.shape, result.dtype), x)
+    jax.effects_barrier()
+    self.assertAllClose(f(x), result)
+
+  @with_pure_and_io_callbacks
+  def test_recv_zero_dim_and_non_zero_dim_arrays(self, *, callback):
+    x = np.full((2,), 42., dtype=np.float32)
+    result0 = np.ones((2, 0), dtype=np.float32)
+    result1 = x
+    result2 = np.ones((3, 0), dtype=np.int32)
+    result3 = np.concatenate([x, x]) + 1.
+    def _callback(x):  # x: f32[2] -> (f32[2, 0], f32[2], f32[3, 0], f32[4])
+      return (result0, x, result2, np.concatenate([x, x]) + 1.)
+
+    @jax.jit
+    def f(x):
+      return callback(
+          _callback, (core.ShapedArray(result0.shape, result0.dtype),
+                      core.ShapedArray(result1.shape, result1.dtype),
+                      core.ShapedArray(result2.shape, result2.dtype),
+                      core.ShapedArray(result3.shape, result3.dtype)), x)
+    res = f(x)
+    jax.effects_barrier()
+    self.assertAllClose(res, (result0, result1, result2, result3))
+
+  @with_pure_and_io_callbacks
+  def test_callback_with_pytree_arguments_and_return_values(self, *, callback):
 
     def _callback(x):
       return dict(y=[x])
@@ -286,9 +379,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     self.assertEqual(out, dict(y=[2.]))
 
-  def test_callback_inside_of_while_loop_of_scalars(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_while_loop_of_scalars(self, *, callback):
 
     def _callback(x):
       return (x + 1.).astype(x.dtype)
@@ -305,9 +397,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     self.assertEqual(out, 10.)
 
-  def test_callback_inside_of_while_loop(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_while_loop(self, *, callback):
 
     def _callback(x):
       return (x + 1.).astype(x.dtype)
@@ -327,9 +418,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     np.testing.assert_allclose(out, jnp.arange(10., 15.))
 
-  def test_callback_inside_of_cond_of_scalars(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_cond_of_scalars(self, *, callback):
 
     def _callback1(x):
       return (x + 1.).astype(x.dtype)
@@ -355,9 +445,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     self.assertEqual(out, 0.)
 
-  def test_callback_inside_of_cond(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_cond(self, *, callback):
 
     def _callback1(x):
       return x + 1.
@@ -383,9 +472,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     np.testing.assert_allclose(out, jnp.zeros(2))
 
-  def test_callback_inside_of_scan_of_scalars(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_scan_of_scalars(self, *, callback):
 
     def _callback(x):
       return (x + 1.).astype(x.dtype)
@@ -403,9 +491,8 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     self.assertEqual(out, 10.)
 
-  def test_callback_inside_of_scan(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_scan(self, *, callback):
 
     def _callback(x):
       return x + 1.
@@ -423,9 +510,10 @@ class PythonCallbackTest(jtu.JaxTestCase):
     jax.effects_barrier()
     np.testing.assert_allclose(out, jnp.arange(2.) + 10.)
 
-  def test_callback_inside_of_pmap_of_scalars(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_pmap_of_scalars(self, *, callback):
+    if callback is io_callback_ordered:
+      self.skipTest("N/A")
 
     def _callback(x):
       return (x + 1.).astype(x.dtype)
@@ -439,9 +527,10 @@ class PythonCallbackTest(jtu.JaxTestCase):
     np.testing.assert_allclose(
         out, np.arange(jax.local_device_count(), dtype=np.float32) + 1.)
 
-  def test_callback_inside_of_pmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  @with_pure_and_io_callbacks
+  def test_callback_inside_of_pmap(self, *, callback):
+    if callback is io_callback_ordered:
+      self.skipTest("N/A")
 
     def _callback(x):
       return x + 1.
@@ -458,33 +547,65 @@ class PythonCallbackTest(jtu.JaxTestCase):
         out,
         np.arange(2 * jax.local_device_count()).reshape([-1, 2]) + 1.)
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
-class PurePythonCallbackTest(jtu.JaxTestCase):
+  @with_pure_and_io_callbacks
+  @jtu.thread_unsafe_test()  # logging isn't thread-safe
+  def test_exception_in_callback(self, *, callback):
+    def fail(x):
+      raise RuntimeError("Ooops")
+
+    @jax.jit
+    def f(x):
+      return callback(fail, core.ShapedArray(x.shape, x.dtype), x)
+
+    with self.assertLogs(level="ERROR") as l:
+      try:
+        f(0.0).block_until_ready()
+      except RuntimeError:
+        pass
+
+      api_name = (
+          "pure_callback" if callback is jax.pure_callback else "io_callback"
+      )
+      output = "\n".join(l.output)
+      self.assertIn(f"jax.{api_name} failed", output)
+      self.assertIn("Traceback (most recent call last)", output)
+
+  @with_pure_and_io_callbacks
+  @jtu.thread_unsafe_test()  # count_primitive_compiles isn't thread-safe
+  def test_compilation_caching(self, *, callback):
+    def f_outside(x):
+      return 2 * x
+
+    def fun(x):
+      return callback(f_outside, x, x)
+
+    x = np.arange(6, dtype=np.int32).reshape((2, 3))
+    with jtu.count_primitive_compiles() as count:
+      for _ in range(3):
+        self.assertAllClose(2 * x, fun(x))
+    self.assertEqual(count(), 1)
+
+
+class PureCallbackTest(jtu.JaxTestCase):
+
+  def setUp(self):
+    super().setUp()
+    if not jtu.test_device_matches(["cpu", "gpu", "tpu"]):
+      self.skipTest(f"Host callback not supported on {jtu.device_under_test()}")
 
   def tearDown(self):
     super().tearDown()
     dispatch.runtime_tokens.clear()
 
-  def test_pure_callback_passes_ndarrays_without_jit(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  def test_pure_callback_passes_jax_arrays_without_jit(self):
 
     def cb(x):
-      self.assertIs(type(x), np.ndarray)
+      self.assertIsInstance(x, jax.Array)
       return x
 
     def f(x):
       return jax.pure_callback(cb, x, x)
     f(jnp.array(2.))
-
-  def test_simple_pure_callback(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
-    @jax.jit
-    def f(x):
-      return jax.pure_callback(lambda x: (x * 2.).astype(x.dtype), x, x)
-    self.assertEqual(f(2.), 4.)
 
   def test_can_dce_pure_callback(self):
 
@@ -504,91 +625,18 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     _ = f(2.)
     self.assertEmpty(log)
 
-  def test_callback_with_wrong_number_of_args(self):
-
-    @jax.jit
-    def f():
-      # Calling a function that expects `x` with no arguments
-      return jax.pure_callback(lambda x: np.ones(4, np.float32),
-                               core.ShapedArray((4,), np.float32))
-
-    with self.assertRaises(RuntimeError):
-      f()
-      jax.effects_barrier()
-
-  def test_callback_with_wrong_number_of_returned_values(self):
-
-    @jax.jit
-    def f(x):
-      # Calling a function with two return values that expects one return value
-      return jax.pure_callback(lambda x: (x, np.ones(4, np.float32)), x, x)
-
-    with self.assertRaises(RuntimeError):
-      f(2.)
-      jax.effects_barrier()
-
-    @jax.jit
-    def g():
-      return jax.pure_callback(lambda: (), (
-        core.ShapedArray((1,), np.float32), core.ShapedArray((2,), np.float32)))
-
-    with self.assertRaises(RuntimeError):
-      g()
-      jax.effects_barrier()
-
-  def test_callback_with_wrong_shape_outputs(self):
-
-    @jax.jit
-    def f():
-      # Calling a function expected a (1,) shaped return value but getting ()
-      return jax.pure_callback(lambda: np.float32(1.),
-                               core.ShapedArray((1,), np.float32))
-
-    with self.assertRaises(RuntimeError):
-      f()
-      jax.effects_barrier()
-
-  def test_callback_with_wrong_dtype_outputs(self):
-
-    def _cb():
-      return np.array([1], np.float64)
-
-    @jax.jit
-    def f():
-      # Calling a function expected a f32 return value but getting f64
-      return callback(_cb, core.ShapedArray((1,), np.float32))
-
-    with self.assertRaises(RuntimeError):
-      f()
-      jax.effects_barrier()
-
-  def test_callback_with_wrongly_specified_64_bit_dtype(self):
-    if config.jax_enable_x64:
-      raise unittest.SkipTest("Test only needed when 64-bit mode disabled.")
-
-    @jax.jit
-    def f():
-      return jax.pure_callback(lambda: np.float64(1.),
-                               core.ShapedArray((), np.float64))
-
-    with self.assertRaises(ValueError):
-      f()
-      jax.effects_barrier()
-
   def test_can_vmap_pure_callback(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     @jax.jit
     @jax.vmap
     def f(x):
-      return jax.pure_callback(np.sin, x, x)
+      return jax.pure_callback(np.sin, x, x, vmap_method="sequential")
     out = f(jnp.arange(4.))
     np.testing.assert_allclose(out, np.sin(np.arange(4.)))
 
     @jax.jit
     def g(x):
-      return jax.pure_callback(np.sin, x, x)
+      return jax.pure_callback(np.sin, x, x, vmap_method="sequential")
     out = jax.vmap(g, in_axes=1)(jnp.arange(8.).reshape((4, 2)))
     np.testing.assert_allclose(out, np.sin(np.arange(8.).reshape((4, 2))).T)
 
@@ -596,7 +644,8 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     @functools.partial(jax.vmap, in_axes=(0, None))
     def h(x, y):
       out_shape = jax.ShapeDtypeStruct(x.shape, np.result_type(x.dtype, y.dtype))
-      return jax.pure_callback(lambda x, y: np.sin(x) + y, out_shape, x, y)
+      return jax.pure_callback(lambda x, y: np.sin(x) + y, out_shape, x, y,
+                               vmap_method="sequential")
     out = h(jnp.arange(4.), 4.)
     self.assertArraysAllClose(out, np.sin(np.arange(4.)) + 4.,
                               rtol=1E-7, check_dtypes=False)
@@ -605,14 +654,24 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     @functools.partial(jax.vmap)
     def h(x, y):
       out_shape = jax.ShapeDtypeStruct(x.shape, np.result_type(x.dtype, y.dtype))
-      return jax.pure_callback(lambda x, y: np.sin(x) + y, out_shape, x, y)
+      return jax.pure_callback(lambda x, y: np.sin(x) + y, out_shape, x, y,
+                               vmap_method="sequential")
     out = h(jnp.arange(4.), jnp.arange(10., 14.))
     self.assertArraysAllClose(out, np.sin(np.arange(4.)) + np.arange(10., 14.),
                               rtol=1E-7, check_dtypes=False)
 
+    @jax.jit
+    @functools.partial(jax.vmap, in_axes=1, out_axes=1)
+    def h(x, y):
+      out_shape = jax.ShapeDtypeStruct(x.shape, np.result_type(x.dtype, y.dtype))
+      return jax.pure_callback(lambda x, y: np.sin(x) + y, out_shape, x, y,
+                               vmap_method="sequential")
+    out = h(jnp.arange(4.)[None], jnp.arange(10., 14.)[None])
+    self.assertArraysAllClose(out, np.sin(np.arange(4.)) + np.arange(10.,
+      14.)[None],
+                              rtol=1E-7, check_dtypes=False)
+
   def test_vmap_vectorized_callback(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     def cb(x):
       self.assertTupleEqual(x.shape, ())
@@ -621,7 +680,7 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     @jax.jit
     @jax.vmap
     def f(x):
-      return jax.pure_callback(cb, x, x)
+      return jax.pure_callback(cb, x, x, vmap_method="sequential")
 
     np.testing.assert_allclose(f(jnp.arange(4.)), np.sin(np.arange(4.)))
 
@@ -632,7 +691,7 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     @jax.jit
     @jax.vmap
     def g(x):
-      return jax.pure_callback(cb2, x, x, vectorized=True)
+      return jax.pure_callback(cb2, x, x, vmap_method="expand_dims")
 
     np.testing.assert_allclose(g(jnp.arange(4.)), np.sin(np.arange(4.)))
 
@@ -640,9 +699,17 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     @functools.partial(jax.vmap, in_axes=(0, None))
     def h(x, y):
       return jax.pure_callback(lambda x, y: np.sin(x) + y, x, x, y,
-                               vectorized=True)
+                               vmap_method="expand_dims")
     out = h(jnp.arange(4.), 4.)
     np.testing.assert_allclose(out, np.sin(np.arange(4.)) + 4.)
+
+    @jax.jit
+    @functools.partial(jax.vmap, in_axes=(1, None), out_axes=1)
+    def h(x, y):
+      return jax.pure_callback(lambda x, y: np.sin(x) + y, x, x, y,
+                               vmap_method="legacy_vectorized")
+    out = h(jnp.arange(4.)[None], 4.)
+    np.testing.assert_allclose(out, np.sin(np.arange(4.)[None]) + 4.)
 
   def test_vmap_vectorized_callback_errors_if_returns_wrong_shape(self):
 
@@ -653,69 +720,19 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     @jax.jit
     @jax.vmap
     def f(x):
-      return jax.pure_callback(cb, x, x, vectorized=True)
+      return jax.pure_callback(cb, x, x, vmap_method="expand_dims")
 
     with self.assertRaises(RuntimeError):
       f(jnp.arange(4.))
       jax.effects_barrier()
 
   def test_can_pmap_pure_callback(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     @jax.pmap
     def f(x):
       return jax.pure_callback(np.sin, x, x)
     out = f(jnp.arange(float(jax.local_device_count())))
     np.testing.assert_allclose(out, np.sin(np.arange(jax.local_device_count())))
-
-  def test_can_pjit_pure_callback_under_hard_xmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest(
-          'Host callback not supported for runtime type: stream_executor.'
-      )
-
-    if not hasattr(xla_client.OpSharding.Type, 'MANUAL'):
-      raise unittest.SkipTest('Manual partitioning needed for pure_callback')
-
-    jtu.set_spmd_lowering_flag(True)
-    jtu.set_spmd_manual_lowering_flag(True)
-    try:
-      mesh = Mesh(np.array(jax.devices()), axis_names=('x',))
-
-      spec = jax.sharding.PartitionSpec('x')
-
-      def f(x):
-        axis_resources = {v: v for v in mesh.axis_names}
-        return xmap(
-            lambda x: jax.pure_callback(np.sin, x, x),
-            in_axes=(('x',),),
-            out_axes=('x',),
-            axis_resources=axis_resources,
-            axis_sizes=mesh.shape,
-        )(x)
-
-      def without_xmap_f(x):
-        return jax.pure_callback(np.sin, x, x)
-
-      with mesh:
-        inp = jnp.arange(float(jax.local_device_count()))
-        out = pjit.pjit(f, in_shardings=spec, out_shardings=spec)(inp)
-        np.testing.assert_allclose(
-            out, np.sin(np.arange(jax.local_device_count()))
-        )
-
-        if jax.local_device_count() > 1:
-          with self.assertRaisesRegex(
-              NotImplementedError, 'when all mesh axes are partitioned manually'
-          ):
-            pjit.pjit(without_xmap_f, in_shardings=spec, out_shardings=spec)(
-                inp
-            )
-
-    finally:
-      jtu.restore_spmd_manual_lowering_flag()
-      jtu.restore_spmd_lowering_flag()
 
   def test_cant_take_grad_of_pure_callback(self):
 
@@ -730,9 +747,31 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
         ValueError, "Pure callbacks do not support JVP."):
       f(2.)
 
+  def test_error_propagation(self):
+    def throws_error_fn(x):
+      raise RuntimeError("Errors should propagate.")
+
+    @jax.jit
+    def f(x):
+      return jax.pure_callback(throws_error_fn, x, x)
+
+    with self.assertRaisesRegex(Exception, "Errors should propagate."):
+      print(np.array(f(2.0)), flush=True)
+
+  def test_reentrant_error_propagation(self):
+    reentrant_fn = jax.jit(jnp.sin).lower(2.0).compile()
+
+    @jax.jit
+    def f(x):
+      return jax.pure_callback(reentrant_fn, x, x)
+
+    try:
+      np.array(f(2.0))
+    except:
+      # Only should not deadlock.
+      pass
+
   def test_can_take_grad_of_pure_callback_with_custom_jvp(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     @jax.custom_jvp
     def sin(x):
@@ -751,8 +790,6 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     np.testing.assert_allclose(out, jnp.cos(2.))
 
   def test_callback_inside_of_cond(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     def _callback1(x):
       return x + 1.
@@ -777,8 +814,6 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     np.testing.assert_allclose(out, jnp.zeros(2))
 
   def test_callback_inside_of_scan(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     def _callback(x):
       return x + 1.
@@ -796,8 +831,6 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     np.testing.assert_allclose(out, jnp.arange(2.) + 10.)
 
   def test_callback_inside_of_while_loop(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     def _cond_callback(x):
       return np.any(x < 10)
@@ -821,8 +854,6 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     np.testing.assert_allclose(out, jnp.arange(10., 15.))
 
   def test_callback_inside_of_pmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     def _callback(x):
       return x + 1.
@@ -838,41 +869,26 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
         out,
         np.arange(2 * jax.local_device_count()).reshape([-1, 2]) + 1.)
 
-  def test_callback_inside_xmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+  def test_callback_with_immediate_executable_destruction(self):
 
-    def _callback(x):
-      return (x + 1.).astype(x.dtype)
+    def loop_body(i, x):
+      del i
+      return jax.pure_callback(lambda y: y + np.ones(4, np.float32),
+                               x, x)
 
-    def f(x):
-      return jax.pure_callback(_callback, x, x)
+    class AClass:
+      def f(self, ys):
+        return lax.fori_loop(0, 10, loop_body, jnp.ones(4, np.float32))
 
-    f = maps.xmap(f, in_axes=['a'], out_axes=['a'],
-                  axis_resources={'a': 'dev'})
-    with jax.sharding.Mesh(np.array(jax.devices()), ['dev']):
-      out = f(np.arange(40.))
-    np.testing.assert_allclose(out, jnp.arange(1., 41.))
-
-  def test_vectorized_callback_inside_xmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
-    def _callback(x):
-      return (x + 1.).astype(x.dtype)
-
-    def f(x):
-      return jax.pure_callback(_callback, x, x, vectorized=True)
-
-    f = maps.xmap(f, in_axes=['a'], out_axes=['a'],
-                  axis_resources={'a': 'dev'})
-    with jax.sharding.Mesh(np.array(jax.devices()), ['dev']):
-      out = f(np.arange(40.))
-    np.testing.assert_allclose(out, jnp.arange(1., 41.))
+    num_devices = jax.local_device_count()
+    c = AClass()
+    out = jax.pmap(c.f)(np.ones((num_devices,), np.float32))
+    # c.f is an ephemeral bound method object, and it will be destroyed
+    # immediately. This test verifies that the execution itself keeps the
+    # callback alive.
+    np.testing.assert_allclose(out, np.full((num_devices, 4), 11, np.float32))
 
   def test_array_layout_is_preserved(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
 
     def g(x):
       return jax.pure_callback(lambda x: x, x, x)
@@ -880,13 +896,150 @@ class PurePythonCallbackTest(jtu.JaxTestCase):
     x = np.arange(6, dtype=np.int32).reshape((3, 2))
     np.testing.assert_allclose(g(x), x)
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
-class IOPythonCallbackTest(jtu.JaxTestCase):
+  def test_can_shard_pure_callback_maximally(self):
+    mesh = Mesh(np.array(jax.devices()), axis_names=('x',))
+
+    spec = jax.sharding.PartitionSpec('x')
+    sharding = jax.sharding.NamedSharding(mesh, spec)
+
+    def func(x):
+      return x + np.arange(x.shape[0], dtype=x.dtype)
+
+    def f(x):
+      return jax.pure_callback(func, x, x)
+
+    inp = jnp.arange(float(jax.local_device_count()))
+    out = jax.jit(f, in_shardings=sharding, out_shardings=sharding)(inp)
+    jax.block_until_ready(out)
+    np.testing.assert_allclose(
+        out, np.arange(jax.local_device_count()) * 2
+    )
+
+  def test_can_shard_pure_callback_maximally_with_sharding(self):
+    mesh = Mesh(np.array(jax.devices()), axis_names=('x',))
+
+    spec = jax.sharding.PartitionSpec('x')
+    sharding = jax.sharding.NamedSharding(mesh, spec)
+
+    def func(x):
+      return x + np.arange(x.shape[0], dtype=x.dtype)
+
+    callback_device = jax.devices()[-1]
+    callback_device_index = sharding._device_assignment.index(callback_device)
+
+    def f(x):
+      sharding = jax.sharding.SingleDeviceSharding(callback_device)
+      return jax.pure_callback(func, x, x, sharding=sharding)
+
+    f_jit = jax.jit(f, in_shardings=sharding, out_shardings=sharding)
+
+    inp = jnp.arange(float(jax.local_device_count()))
+    out = f_jit(inp)
+    jax.block_until_ready(out)
+    np.testing.assert_allclose(
+        out, np.arange(jax.local_device_count()) * 2
+    )
+    stablehlo_ir = f_jit.lower(inp).as_text()
+    if config.use_shardy_partitioner.value:
+      self.assertIn(
+          "sdy.sharding ="
+          f" #sdy.sharding_per_value<[<@maximal_mesh_{callback_device_index},"
+          " []>]>",
+          stablehlo_ir)
+      self.assertIn(
+          f"sdy.mesh @maximal_mesh_{callback_device_index} = <[],"
+          f" device_ids=[{callback_device_index}]>",
+          stablehlo_ir)
+    else:
+      self.assertIn(f"{{maximal device={callback_device_index}}}", stablehlo_ir)
+
+  def test_can_shard_pure_callback_manually(self):
+
+    mesh = Mesh(np.array(jax.devices()), axis_names=('x',))
+
+    spec = jax.sharding.PartitionSpec('x')
+    sharding = jax.sharding.NamedSharding(mesh, spec)
+
+    def func(x):
+      return x + np.arange(x.shape[0], dtype=x.dtype)
+
+    def f(x):
+      return jax.pure_callback(func, x, x)
+    f = shard_map(f, mesh=mesh, in_specs=(spec,), out_specs=spec)
+
+    inp = jnp.arange(float(jax.local_device_count() * 2))
+    out = jax.jit(f, in_shardings=sharding, out_shardings=sharding)(inp)
+    y = np.tile(np.arange(2, dtype=inp.dtype), jax.local_device_count())
+    jax.block_until_ready(out)
+    np.testing.assert_allclose(
+        out, inp + y
+    )
+
+  def test_does_not_deadlock(self):
+    if jtu.device_under_test() == "tpu":
+      self.skipTest("The test raises an exception on TPU")
+
+    def f(x):
+      y = jnp.asarray(x) + 1
+      return np.asarray(2 * jnp.log(y))
+
+    x = jnp.array([1.0, 2.0, 3.0, 4.0])
+    out = jax.pure_callback(f, jax.ShapeDtypeStruct(x.shape, x.dtype), x)
+    np.testing.assert_allclose(out, 2 * jnp.log(x + 1))
+
+  def test_vmap_method_raise(self):
+    @jax.vmap
+    def f(x):
+      # Setting vectorized to None disables the current default behavior of
+      # falling back on sequential.
+      return jax.pure_callback(np.sin, x, x, vectorized=None)
+
+    with self.assertRaisesRegex(NotImplementedError, "vmap is only supported"):
+      f(jnp.arange(4.))
+
+  def test_deprecated_vectorized(self):
+    def f(x, **kwargs):
+      return jax.pure_callback(np.sin, x, x, **kwargs)
+
+    with self.assertWarnsRegex(DeprecationWarning, "The default behavior"):
+      jax.vmap(f)(jnp.arange(4.0))
+
+    with self.assertWarnsRegex(DeprecationWarning, "The vectorized argument"):
+      f(jnp.arange(4.0), vectorized=True)
+
+    with self.assertWarnsRegex(DeprecationWarning, "The vectorized argument"):
+      f(jnp.arange(4.0), vectorized=False)
+
+  def test_vmap_method_expand_dims(self):
+    def callback(x, y):
+      self.assertTupleEqual(x.shape, (4,))
+      self.assertTupleEqual(y.shape, (1,))
+      return x + y
+
+    def f(x, y):
+      return jax.pure_callback(callback, x, x, y, vmap_method="expand_dims")
+
+    jax.vmap(f, in_axes=(0, None))(jnp.arange(4.0), 1.0)  # doesn't error
+
+  def test_vmap_method_broadcast_all(self):
+    def callback(x, y):
+      self.assertTupleEqual(x.shape, (4,))
+      self.assertTupleEqual(y.shape, (4,))
+      return x + y
+
+    def f(x, y):
+      return jax.pure_callback(callback, x, x, y,
+                               vmap_method="broadcast_all")
+
+    jax.vmap(f, in_axes=(0, None))(jnp.arange(4.0), 1.0)  # doesn't error
+
+
+class IOCallbackTest(jtu.JaxTestCase):
 
   def setUp(self):
     super().setUp()
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
+    if not jtu.test_device_matches(["cpu", "gpu", "tpu"]):
+      self.skipTest(f"Host callback not supported on {jtu.device_under_test()}")
 
   def tearDown(self):
     super().tearDown()
@@ -932,14 +1085,6 @@ class IOPythonCallbackTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(
         ValueError, "Ordered effects not supported in `pmap`"):
       jax.pmap(f)(jnp.arange(jax.local_device_count()))
-
-  def test_cannot_call_ordered_io_in_xmap(self):
-    def f(x):
-      return io_callback(
-          lambda x: x, jax.ShapeDtypeStruct((), jnp.int32), x, ordered=True)
-    with self.assertRaisesRegex(
-        ValueError, "Cannot `vmap` ordered IO callback"):
-      maps.xmap(f, in_axes=([0],), out_axes=[0])(jnp.arange(16))
 
   def test_cannot_call_ordered_io_in_vmap(self):
     def f(x):
@@ -994,8 +1139,8 @@ class IOPythonCallbackTest(jtu.JaxTestCase):
         io_callback(check, None, i)
         return i + 1
       return lax.while_loop(cond, body, i)
-    with self.assertRaisesRegex(NotImplementedError,
-        "IO effect not supported in vmap-of-while."):
+    with self.assertRaisesRegex(
+        Exception, "not supported in while_loop with batched predicate"):
       jax.vmap(f)(jnp.array([0, 4]))
 
   def test_cannot_use_io_callback_in_checkpoint(self):
@@ -1009,29 +1154,193 @@ class IOPythonCallbackTest(jtu.JaxTestCase):
         "Effects not supported in partial-eval of `checkpoint`"):
       f(2., 3.)
 
-  def test_can_use_io_callback_in_pjit(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name=f'{ordered=}_{with_sharding=}',
+          ordered=ordered,
+          with_sharding=with_sharding,
+      )
+      for ordered in [True, False]
+      for with_sharding in [True, False]
+  )
+  def test_can_use_io_callback_in_pjit(
+      self, *, ordered: bool, with_sharding: bool
+  ):
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices), ['dev'])
 
-    _mut = 0
+    _collected: list[int] = []
     def _cb(x):
-      nonlocal _mut
-      _mut = x.sum()
+      nonlocal _collected
+      _collected.append(int(x.sum()))
+
+    io_callback_kwargs = dict(ordered=ordered)
+    callback_device = devices[0]
+    if with_sharding:
+      callback_device = devices[-1]
+      io_callback_kwargs['sharding'] = jax.sharding.SingleDeviceSharding(
+          callback_device
+      )
 
     def f(x):
-      io_callback(_cb, None, x)
+      io_callback(_cb, None, x, **io_callback_kwargs)
+      io_callback(_cb, None, x + 1, **io_callback_kwargs)
       return x
 
-    mesh = jax.sharding.Mesh(np.array(jax.devices()), ['dev'])
-    if config.jax_array:
-      spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
-      out_spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-    else:
-      spec = jax.sharding.PartitionSpec('dev')
-      out_spec = jax.sharding.PartitionSpec()
-    f = pjit.pjit(f, in_shardings=spec, out_shardings=out_spec)
+    in_spec = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec('dev')
+    )
+    out_spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    f = pjit.pjit(f, in_shardings=in_spec, out_shardings=out_spec)
+    expected = []
     with mesh:
-      f(jnp.arange(mesh.size))
-      jax.effects_barrier()
-    self.assertEqual(_mut, jnp.arange(mesh.size).sum())
+      x = jnp.arange(mesh.size)
+      f(x)
+      expected.extend([int(x.sum()), int((x + 1).sum())])
+      f(x + 5)
+      expected.extend([int((x + 5).sum()), int((x + 6).sum())])
+
+    jax.effects_barrier()
+    if ordered:
+      self.assertAllClose(_collected, expected)
+    else:
+      self.assertEqual(len(_collected), len(expected))
+      for v in expected:
+        self.assertIn(v, _collected)
+
+    callback_device_index = in_spec._device_assignment.index(callback_device)
+    stablehlo_ir = f.lower(x).as_text()
+    if config.use_shardy_partitioner.value:
+      self.assertIn(
+          "sdy.sharding ="
+          f" #sdy.sharding_per_value<[<@maximal_mesh_{callback_device_index},"
+          " []>]>",
+          stablehlo_ir)
+      self.assertIn(
+          f"sdy.mesh @maximal_mesh_{callback_device_index} = <[],"
+          f" device_ids=[{callback_device_index}]>",
+          stablehlo_ir)
+    else:
+      self.assertIn(f"{{maximal device={callback_device_index}}}", stablehlo_ir)
+
+  def test_sequence_pjit_io_callback_ordered(self):
+    # A sequence of pairs of calls to pjit(io_callback(ordered=True)) with each
+    # pair on a different device assignment.
+    _collected: list[int] = []
+    def _cb(i, x):
+      nonlocal _collected
+      # Sleep different amounts of time, to test the ordering.
+      time.sleep([0.02, 0.03, 0.04][len(_collected) % 3])
+      logging.info('Collected iteration %s: %s', i, x)
+      _collected.append(int(x.sum()))
+
+    def f_base(i, x):
+      io_callback(_cb, None, i, x, ordered=True)
+      io_callback(_cb, None, i, x + 1, ordered=True)
+
+    nr_iterations = 8
+    # TODO(zce): If I pin to 1 device below (jax.devices()[:1]) then this test
+    # flakes. It also flakes when pinned to 2 devices. It seems that repeatedly
+    # dispatching to the same device triggers the problem.
+    devices = jax.devices()
+    expected = []  # The expected value for _collected
+    for i in range(nr_iterations):
+      if len(devices) > 1:
+        devices_for_iteration = [
+            devices[i % len(devices)],
+            devices[(i + 1) % len(devices)],
+        ]
+      else:
+        devices_for_iteration = devices
+      logging.info(
+          'Running iteration %d on devices %s', i, devices_for_iteration
+      )
+      mesh = jax.sharding.Mesh(np.array(devices_for_iteration), ['dev'])
+      in_spec = (
+          jax.sharding.NamedSharding(mesh, None),
+          jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev')),
+      )
+      out_spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      f = pjit.pjit(f_base, in_shardings=in_spec, out_shardings=out_spec)
+      with mesh:
+        x = jax.device_put(
+            np.arange(len(devices_for_iteration), dtype=np.int32) + 10 * i,
+            in_spec[1],
+        )
+        f(i, x)
+        expected.extend([int(x.sum()), int((x + 1).sum())])
+        f(i, x + 5)
+        expected.extend([int((x + 5).sum()), int((x + 6).sum())])
+
+    jax.effects_barrier()
+    self.assertEqual(_collected, expected)
+
+  def test_can_shard_io_callback_manually(self):
+    if config.use_shardy_partitioner.value:
+      self.skipTest("TODO(b/384938613): Failing under shardy.")
+
+    mesh = Mesh(np.array(jax.devices()), axis_names=('x',))
+
+    spec = jax.sharding.PartitionSpec('x')
+    sharding = jax.sharding.NamedSharding(mesh, spec)
+
+    _collected = collections.defaultdict(list)
+
+    def func(shard_id, x):
+      nonlocal _collected
+      _collected[shard_id.item()].append(x)
+
+    def f(shard_ids, x):
+      io_callback(func, None, shard_ids, x, ordered=True)
+      io_callback(func, None, shard_ids, x + 1, ordered=True)
+    f = shard_map(f, mesh=mesh, in_specs=spec, out_specs=None)
+
+    shard_ids = jnp.arange(mesh.devices.size)
+    inp = jnp.arange(2 * jax.local_device_count())
+    jax.jit(f, in_shardings=sharding, out_shardings=None)(shard_ids, inp)
+    jax.effects_barrier()
+
+    self.assertLen(_collected, mesh.devices.size)
+    # Verify the partial ordering: no specified order across shards, but strict
+    # ordering between the two calls in each shard.
+    for shard in _collected.values():
+      self.assertLen(shard, 2)
+      np.testing.assert_array_equal(shard[0] + 1, shard[1])
+
+  def test_batching_with_side_effects(self):
+    # https://github.com/jax-ml/jax/issues/20628#issuecomment-2050800195
+    x_lst = []
+    def append_x(x):
+      nonlocal x_lst
+      x_lst.append(x)
+
+    @jax.jit
+    def f(x):
+      io_callback(append_x, None, x, ordered=False)
+      io_callback(append_x, None, 2 * x, ordered=False)
+
+    jax.vmap(f)(jnp.arange(3.))
+    jax.effects_barrier()
+    self.assertAllClose(x_lst, [0., 1., 2., 0., 2., 4.], check_dtypes=False)
+
+  def test_batching_with_side_effects_while_loop(self):
+    # https://github.com/jax-ml/jax/issues/20628#issuecomment-2050921219
+    x_lst = []
+    def append_x(x):
+      nonlocal x_lst
+      x_lst.append(x)
+
+    @jax.jit
+    def f(x):
+      def body(i):
+        io_callback(append_x, None, x, ordered=False)
+        io_callback(append_x, None, 2 * x, ordered=False)
+        return i + 1
+      jax.lax.while_loop(lambda i: i < 2, body, 0)
+
+    jax.vmap(f)(jnp.arange(3.))  # don't crash
+    jax.effects_barrier()
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

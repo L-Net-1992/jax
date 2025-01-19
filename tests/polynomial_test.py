@@ -19,12 +19,12 @@ from scipy.sparse import csgraph, csr_matrix
 
 from absl.testing import absltest
 
+import jax
 from jax._src import dtypes
 from jax import numpy as jnp
 from jax._src import test_util as jtu
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 all_dtypes = jtu.dtypes.floating + jtu.dtypes.integer + jtu.dtypes.complex
@@ -72,7 +72,7 @@ class TestPolynomial(jtu.JaxTestCase):
     trailing=[0, 2],
   )
   # TODO(phawkins): no nonsymmetric eigendecomposition implementation on GPU.
-  @jtu.skip_on_devices("gpu", "tpu")
+  @jtu.run_on_devices("cpu")
   def testRoots(self, dtype, length, leading, trailing):
     rng = jtu.rand_some_zero(self.rng())
 
@@ -98,7 +98,7 @@ class TestPolynomial(jtu.JaxTestCase):
     trailing=[0, 2],
   )
   # TODO(phawkins): no nonsymmetric eigendecomposition implementation on GPU.
-  @jtu.skip_on_devices("gpu", "tpu")
+  @jtu.run_on_devices("cpu")
   def testRootsNoStrip(self, dtype, length, leading, trailing):
     rng = jtu.rand_some_zero(self.rng())
 

@@ -14,34 +14,9 @@
 
 """Utilities for running JAX on Cloud TPUs via Colab."""
 
-import requests
-import os
 
-from jax.config import config
-
-TPU_DRIVER_MODE = 0
-
-
-def setup_tpu(tpu_driver_version='tpu_driver_20230216'):
-  """Sets up Colab to run on TPU.
-
-  Note: make sure the Colab Runtime is set to Accelerator: TPU.
-
-  Args
-  ----
-  tpu_driver_version : (str) specify the version identifier for the tpu driver.
-    Set to "tpu_driver_nightly" to use the nightly tpu driver build.
-  """
-  global TPU_DRIVER_MODE
-
-  if not TPU_DRIVER_MODE:
-    colab_tpu_addr = os.environ['COLAB_TPU_ADDR'].split(':')[0]
-    url = f'http://{colab_tpu_addr}:8475/requestversion/{tpu_driver_version}'
-    requests.post(url)
-    TPU_DRIVER_MODE = 1
-
-  # The following is required to use TPU Driver as JAX's backend.
-  config.FLAGS.jax_xla_backend = "tpu_driver"
-  config.FLAGS.jax_backend_target = "grpc://" + os.environ['COLAB_TPU_ADDR']
-  # TODO(skyewm): Remove this after SPMD is supported for colab tpu.
-  config.update('jax_array', False)
+def setup_tpu(tpu_driver_version=None):
+  """Raises an error. Do not use."""
+  raise RuntimeError(
+    "jax.tools.colab_tpu.setup_tpu() was required for older JAX versions"
+    " running on older generations of TPUs, and should no longer be used.")

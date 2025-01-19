@@ -16,18 +16,18 @@
 import functools
 
 import jax
-from jax.config import config
 import jax.numpy as jnp
 import numpy as np
 import scipy.linalg as osp_linalg
-from jax._src.lax import svd
+from jax._src import config
 from jax._src import test_util as jtu
+from jax._src.lax import svd
 
 from absl.testing import absltest
 
 
 config.parse_flags_with_absl()
-_JAX_ENABLE_X64 = config.x64_enabled
+_JAX_ENABLE_X64 = config.enable_x64.value
 
 # Input matrix data type for SvdTest.
 _SVD_TEST_DTYPE = np.float64 if _JAX_ENABLE_X64 else np.float32
@@ -43,6 +43,22 @@ _MAX_LOG_CONDITION_NUM = 9 if _JAX_ENABLE_X64 else 4
 
 @jtu.with_config(jax_numpy_rank_promotion='allow')
 class SvdTest(jtu.JaxTestCase):
+
+  @jtu.sample_product(
+      shape=[(4, 5), (3, 4, 5), (2, 3, 4, 5)],
+      dtype=jtu.dtypes.floating + jtu.dtypes.complex,
+  )
+  @jax.default_matmul_precision('float32')
+  def testSvdvals(self, shape, dtype):
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    jnp_fun = jax.numpy.linalg.svdvals
+    if jtu.numpy_version() < (2, 0, 0):
+      np_fun = lambda x: np.linalg.svd(x, compute_uv=False)
+    else:
+      np_fun = np.linalg.svdvals
+    self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker, rtol=_SVD_RTOL, atol=1E-5)
+    self._CompileAndCheck(jnp_fun, args_maker, rtol=_SVD_RTOL)
 
   @jtu.sample_product(
     [dict(m=m, n=n) for m, n in zip([2, 8, 10, 20], [4, 6, 10, 18])],
@@ -134,6 +150,26 @@ class SvdTest(jtu.JaxTestCase):
       np.testing.assert_almost_equal(diff, 1E-4, decimal=2)
 
   @jtu.sample_product(
+      [dict(m=m, r=r) for m, r in zip([8, 8, 8, 10], [3, 5, 7, 9])],
+  )
+  def testSvdWithOnRankDeficientInputZeroColumns(self, m, r):
+    """Tests SVD with rank-deficient input."""
+    with jax.default_matmul_precision('float32'):
+      np.random.seed(1235)
+      a = np.random.randn(m, m).astype(_SVD_TEST_DTYPE)
+      d = np.ones(m).astype(_SVD_TEST_DTYPE)
+      d[r:m] = 0
+      a = a @ np.diag(d)
+
+      with jax.default_matmul_precision('float32'):
+        u, s, v = svd.svd(a, full_matrices=True, hermitian=False)
+      diff = np.linalg.norm(a - (u * s) @ v)
+      np.testing.assert_almost_equal(diff, 1e-4, decimal=2)
+      # Check that u and v are orthogonal.
+      self.assertAllClose(u.T.conj() @ u, np.eye(m), atol=10 * _SVD_TEST_EPS)
+      self.assertAllClose(v.T.conj() @ v, np.eye(m), atol=11 * _SVD_TEST_EPS)
+
+  @jtu.sample_product(
     [dict(m=m, n=n) for m, n in zip([2, 8, 10, 20], [4, 6, 10, 18])],
     log_cond=np.linspace(1, _MAX_LOG_CONDITION_NUM, 4),
     full_matrices=[True, False],
@@ -173,32 +209,54 @@ class SvdTest(jtu.JaxTestCase):
         np.testing.assert_array_less(actual_diff, np.zeros_like(actual_diff))
 
   @jtu.sample_product(
-    [dict(m=m, n=n) for m, n in zip([2, 4, 8], [4, 4, 6])],
-    full_matrices=[True, False],
-    compute_uv=[True, False],
-    dtype=jtu.dtypes.floating + jtu.dtypes.complex,
+      [dict(m=m, n=n) for m, n in zip([2, 4, 8], [4, 4, 6])],
+      full_matrices=[True, False],
+      compute_uv=[True, False],
+      dtype=jtu.dtypes.floating + jtu.dtypes.complex,
   )
-  def testSvdOnZero(self, m, n, full_matrices, compute_uv, dtype):
-    """Tests SVD on matrix of all zeros."""
-    osp_fun = functools.partial(osp_linalg.svd, full_matrices=full_matrices,
-                                compute_uv=compute_uv)
-    lax_fun = functools.partial(svd.svd, full_matrices=full_matrices,
-                                compute_uv=compute_uv)
+  def testSvdAllZero(self, m, n, full_matrices, compute_uv, dtype):
+    """Tests SVD on matrix of all zeros, +/-infinity or NaN."""
+    osp_fun = functools.partial(
+        osp_linalg.svd, full_matrices=full_matrices, compute_uv=compute_uv
+    )
+    lax_fun = functools.partial(
+        svd.svd, full_matrices=full_matrices, compute_uv=compute_uv
+    )
     args_maker_svd = lambda: [jnp.zeros((m, n), dtype=dtype)]
     self._CheckAgainstNumpy(osp_fun, lax_fun, args_maker_svd)
     self._CompileAndCheck(lax_fun, args_maker_svd)
 
+  @jtu.sample_product(
+      [dict(m=m, n=n) for m, n in zip([2, 4, 8], [4, 4, 6])],
+      fill_value=[-np.inf, np.inf, np.nan],
+      full_matrices=[True, False],
+      compute_uv=[True, False],
+      dtype=jtu.dtypes.floating + jtu.dtypes.complex,
+  )
+  def testSvdNonFiniteValues(
+      self, m, n, fill_value, full_matrices, compute_uv, dtype
+  ):
+    """Tests SVD on matrix of all zeros, +/-infinity or NaN."""
+    lax_fun = functools.partial(
+        svd.svd, full_matrices=full_matrices, compute_uv=compute_uv
+    )
+    args_maker_svd = lambda: [
+        jnp.full((m, n), fill_value=fill_value, dtype=dtype)
+    ]
+    result = lax_fun(args_maker_svd()[0])
+    for r in result:
+      self.assertTrue(jnp.all(jnp.isnan(r)))
+    self._CompileAndCheck(lax_fun, args_maker_svd)
 
   @jtu.sample_product(
     [dict(m=m, n=n, r=r, c=c)
      for m, n, r, c in zip([2, 4, 8], [4, 4, 6], [1, 0, 1], [1, 0, 1])],
     dtype=jtu.dtypes.floating,
   )
-  @jtu.skip_on_devices("rocm")
   def testSvdOnTinyElement(self, m, n, r, c, dtype):
     """Tests SVD on matrix of zeros and close-to-zero entries."""
     a = jnp.zeros((m, n), dtype=dtype)
-    tiny_element = jnp.finfo(a).tiny
+    tiny_element = jnp.finfo(a.dtype).tiny
     a = a.at[r, c].set(tiny_element)
 
     @jax.jit
@@ -213,6 +271,42 @@ class SvdTest(jtu.JaxTestCase):
 
     self.assertAllClose(expected_s, jnp.real(actual_s), rtol=_SVD_RTOL,
                         atol=1E-6)
+
+  @jtu.sample_product(
+      start=[0, 1, 64, 126, 127],
+      end=[1, 2, 65, 127, 128],
+  )
+  @jtu.run_on_devices('tpu')  # TODO(rmlarsen: enable on other devices)
+  def testSvdSubsetByIndex(self, start, end):
+    if start >= end:
+      return
+    dtype = np.float32
+    m = 256
+    n = 128
+    rng = jtu.rand_default(self.rng())
+    tol = np.maximum(n, 80) * np.finfo(dtype).eps
+    args_maker = lambda: [rng((m, n), dtype)]
+    subset_by_index = (start, end)
+    k = end - start
+    (a,) = args_maker()
+
+    u, s, vt = jnp.linalg.svd(
+        a, full_matrices=False, subset_by_index=subset_by_index
+    )
+    self.assertEqual(u.shape, (m, k))
+    self.assertEqual(s.shape, (k,))
+    self.assertEqual(vt.shape, (k, n))
+
+    with jax.numpy_rank_promotion('allow'):
+      self.assertLessEqual(
+          np.linalg.norm(np.matmul(a, vt.T) - u * s), tol * np.linalg.norm(a)
+      )
+
+    # Test that we get the approximately the same singular values when
+    # slicing the full SVD.
+    _, full_s, _ = jnp.linalg.svd(a, full_matrices=False)
+    s_slice = full_s[start:end]
+    self.assertAllClose(s_slice, s, atol=tol, rtol=tol)
 
 
 if __name__ == '__main__':

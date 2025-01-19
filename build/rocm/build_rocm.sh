@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # Copyright 2022 The JAX Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,23 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# NOTE(mrodden): ROCm JAX build and installs have moved to wheel based builds and installs,
+# but some CI scripts still try to run this script. Nothing needs to be done here,
+# but we print some debugging information for logs.
+
 set -eux
+python -V
 
-ROCM_TF_FORK_REPO="https://github.com/ROCmSoftwarePlatform/tensorflow-upstream"
-ROCM_TF_FORK_BRANCH="develop-upstream"
-rm -rf /tmp/tensorflow-upstream || true
-git clone -b ${ROCM_TF_FORK_BRANCH} ${ROCM_TF_FORK_REPO} /tmp/tensorflow-upstream
-if [ ! -v TENSORFLOW_ROCM_COMMIT ]; then
-    echo "The TENSORFLOW_ROCM_COMMIT environment variable is not set, using top of branch"
-elif [ ! -z "$TENSORFLOW_ROCM_COMMIT" ]
-then
-      echo "Using tensorflow-rocm at commit: $TENSORFLOW_ROCM_COMMIT"
-      cd /tmp/tensorflow-upstream
-      git checkout $TENSORFLOW_ROCM_COMMIT
-      cd -
-fi
-
-
-python3 ./build/build.py --enable_rocm --rocm_path=${ROCM_PATH} --bazel_options=--override_repository=org_tensorflow=/tmp/tensorflow-upstream
-pip3 install --force-reinstall dist/*.whl  # installs jaxlib (includes XLA)
-pip3 install --force-reinstall .  # installs jax
+printf "Detected jaxlib version: %s\n" $(pip3 list | grep jaxlib | tr -s ' ' | cut -d " " -f 2 | cut -d "+" -f 1)
+printf "Detected ROCm version: %s\n" $(cat /opt/rocm/.info/version | cut -d "-" -f 1)

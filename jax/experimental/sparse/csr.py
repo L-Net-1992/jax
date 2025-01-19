@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from functools import partial
 import operator
-from typing import Optional, Tuple
 import warnings
 
 import numpy as np
@@ -34,12 +33,12 @@ from jax._src import dispatch
 from jax._src.interpreters import ad
 from jax._src.lax.lax import _const
 from jax._src.lib import gpu_sparse
-from jax._src.numpy.lax_numpy import _promote_dtypes
-from jax._src.typing import Array, ArrayLike, DTypeLike
+from jax._src.numpy.util import promote_dtypes
+from jax._src.typing import Array, DTypeLike
 import jax.numpy as jnp
 
 
-Shape = Tuple[int, ...]
+Shape = tuple[int, ...]
 
 
 @tree_util.register_pytree_node_class
@@ -57,7 +56,7 @@ class CSR(JAXSparse):
   data: jax.Array
   indices: jax.Array
   indptr: jax.Array
-  shape: Tuple[int, int]
+  shape: tuple[int, int]
   nse = property(lambda self: self.data.size)
   dtype = property(lambda self: self.data.dtype)
   _bufs = property(lambda self: (self.data, self.indices, self.indptr))
@@ -117,7 +116,7 @@ class CSR(JAXSparse):
     if isinstance(other, JAXSparse):
       raise NotImplementedError("matmul between two sparse objects.")
     other = jnp.asarray(other)
-    data, other = _promote_dtypes(self.data, other)
+    data, other = promote_dtypes(self.data, other)
     if other.ndim == 1:
       return _csr_matvec(data, self.indices, self.indptr, other, shape=self.shape)
     elif other.ndim == 2:
@@ -144,7 +143,7 @@ class CSC(JAXSparse):
   data: jax.Array
   indices: jax.Array
   indptr: jax.Array
-  shape: Tuple[int, int]
+  shape: tuple[int, int]
   nse = property(lambda self: self.data.size)
   dtype = property(lambda self: self.data.dtype)
 
@@ -184,7 +183,7 @@ class CSC(JAXSparse):
     if isinstance(other, JAXSparse):
       raise NotImplementedError("matmul between two sparse objects.")
     other = jnp.asarray(other)
-    data, other = _promote_dtypes(self.data, other)
+    data, other = promote_dtypes(self.data, other)
     if other.ndim == 1:
       return _csr_matvec(data, self.indices, self.indptr, other,
                          shape=self.shape[::-1], transpose=True)
@@ -300,7 +299,7 @@ if gpu_sparse.rocm_is_supported:
 csr_fromdense_p = core.Primitive('csr_fromdense')
 csr_fromdense_p.multiple_results = True
 
-def csr_fromdense(mat: Array, *, nse: Optional[int] = None, index_dtype: DTypeLike = np.int32) -> CSR:
+def csr_fromdense(mat: Array, *, nse: int | None = None, index_dtype: DTypeLike = np.int32) -> CSR:
   """Create a CSR-format sparse matrix from a dense matrix.
 
   Args:
@@ -317,7 +316,7 @@ def csr_fromdense(mat: Array, *, nse: Optional[int] = None, index_dtype: DTypeLi
   nse_int = core.concrete_or_error(operator.index, nse, "coo_fromdense nse argument")
   return CSR(_csr_fromdense(mat, nse=nse_int, index_dtype=index_dtype), shape=mat.shape)
 
-def _csr_fromdense(mat: Array, *, nse: int, index_dtype: DTypeLike = np.int32) -> Tuple[Array, Array, Array]:
+def _csr_fromdense(mat: Array, *, nse: int, index_dtype: DTypeLike = np.int32) -> tuple[Array, Array, Array]:
   """Create CSR-format sparse matrix from a dense matrix.
 
   Args:
@@ -380,11 +379,11 @@ def _csr_fromdense_jvp(primals, tangents, *, nse, index_dtype):
   data, indices, indptr = primals_out
 
   if type(Mdot) is ad.Zero:
-    data_dot = ad.Zero.from_value(data)
+    data_dot = ad.Zero.from_primal_value(data)
   else:
     data_dot = _csr_extract(indices, indptr, Mdot)
 
-  tangents_out = (data_dot, ad.Zero.from_value(indices), ad.Zero.from_value(indptr))
+  tangents_out = (data_dot, ad.Zero.from_primal_value(indices), ad.Zero.from_primal_value(indptr))
 
   return primals_out, tangents_out
 
@@ -559,7 +558,7 @@ def _csr_matmat(data: Array, indices: Array, indptr: Array, B: Array,
 
   Returns:
     C : array of shape ``(shape[1] if transpose else shape[0], cols)``
-      representing the matrix-matrix product product.
+      representing the matrix-matrix product.
   """
   return csr_matmat_p.bind(data, indices, indptr, B, shape=shape, transpose=transpose)
 

@@ -17,20 +17,28 @@ from functools import partial
 from typing import Any
 
 import numpy as np
-import scipy.stats as osp_stats
 
 import jax.numpy as jnp
 from jax import jit, lax, random, vmap
-from jax._src.numpy.lax_numpy import _check_arraylike, _promote_dtypes_inexact
-from jax._src.numpy.util import _wraps
+from jax._src.numpy.util import check_arraylike, promote_dtypes_inexact
 from jax._src.tree_util import register_pytree_node_class
 from jax.scipy import linalg, special
 
 
-@_wraps(osp_stats.gaussian_kde, update_doc=False)
 @register_pytree_node_class
 @dataclass(frozen=True, init=False)
 class gaussian_kde:
+  """Gaussian Kernel Density Estimator
+
+  JAX implementation of :class:`scipy.stats.gaussian_kde`.
+
+  Parameters:
+    dataset: arraylike, real-valued. Data from which to estimate the distribution.
+      If 1D, shape is (n_data,). If 2D, shape is (n_dimensions, n_data).
+    bw_method: string, scalar, or callable. Either "scott", "silverman", a scalar
+      value, or a callable function which takes ``self`` as a parameter.
+    weights: arraylike, optional. Weights of the same shape as the dataset.
+  """
   neff: Any
   dataset: Any
   weights: Any
@@ -38,7 +46,7 @@ class gaussian_kde:
   inv_cov: Any
 
   def __init__(self, dataset, bw_method=None, weights=None):
-    _check_arraylike("gaussian_kde", dataset)
+    check_arraylike("gaussian_kde", dataset)
     dataset = jnp.atleast_2d(dataset)
     if jnp.issubdtype(lax.dtype(dataset), jnp.complexfloating):
       raise NotImplementedError("gaussian_kde does not support complex data")
@@ -47,8 +55,8 @@ class gaussian_kde:
 
     d, n = dataset.shape
     if weights is not None:
-      _check_arraylike("gaussian_kde", weights)
-      dataset, weights = _promote_dtypes_inexact(dataset, weights)
+      check_arraylike("gaussian_kde", weights)
+      dataset, weights = promote_dtypes_inexact(dataset, weights)
       weights = jnp.atleast_1d(weights)
       weights /= jnp.sum(weights)
       if weights.ndim != 1:
@@ -56,7 +64,7 @@ class gaussian_kde:
       if len(weights) != n:
         raise ValueError("`weights` input should be of length n")
     else:
-      dataset, = _promote_dtypes_inexact(dataset)
+      dataset, = promote_dtypes_inexact(dataset)
       weights = jnp.full(n, 1.0 / n, dtype=dataset.dtype)
 
     self._setattr("dataset", dataset)
@@ -114,27 +122,26 @@ class gaussian_kde:
   def n(self):
     return self.dataset.shape[1]
 
-  @_wraps(osp_stats.gaussian_kde.evaluate, update_doc=False)
   def evaluate(self, points):
-    _check_arraylike("evaluate", points)
+    """Evaluate the Gaussian KDE on the given points."""
+    check_arraylike("evaluate", points)
     points = self._reshape_points(points)
     result = _gaussian_kernel_eval(False, self.dataset.T, self.weights[:, None],
                                    points.T, self.inv_cov)
     return result[:, 0]
 
-  @_wraps(osp_stats.gaussian_kde.__call__, update_doc=False)
   def __call__(self, points):
     return self.evaluate(points)
 
-  @_wraps(osp_stats.gaussian_kde.integrate_gaussian, update_doc=False)
   def integrate_gaussian(self, mean, cov):
+    """Integrate the distribution weighted by a Gaussian."""
     mean = jnp.atleast_1d(jnp.squeeze(mean))
     cov = jnp.atleast_2d(cov)
 
     if mean.shape != (self.d,):
-      raise ValueError("mean does not have dimension {}".format(self.d))
+      raise ValueError(f"mean does not have dimension {self.d}")
     if cov.shape != (self.d, self.d):
-      raise ValueError("covariance does not have dimension {}".format(self.d))
+      raise ValueError(f"covariance does not have dimension {self.d}")
 
     chol = linalg.cho_factor(self.covariance + cov)
     norm = jnp.sqrt(2 * np.pi)**self.d * jnp.prod(jnp.diag(chol[0]))
@@ -142,8 +149,8 @@ class gaussian_kde:
     return _gaussian_kernel_convolve(chol, norm, self.dataset, self.weights,
                                      mean)
 
-  @_wraps(osp_stats.gaussian_kde.integrate_box_1d, update_doc=False)
   def integrate_box_1d(self, low, high):
+    """Integrate the distribution over the given limits."""
     if self.d != 1:
       raise ValueError("integrate_box_1d() only handles 1D pdfs")
     if jnp.ndim(low) != 0 or jnp.ndim(high) != 0:
@@ -154,8 +161,8 @@ class gaussian_kde:
     high = jnp.squeeze((high - self.dataset) / sigma)
     return jnp.sum(self.weights * (special.ndtr(high) - special.ndtr(low)))
 
-  @_wraps(osp_stats.gaussian_kde.integrate_kde, update_doc=False)
   def integrate_kde(self, other):
+    """Integrate the product of two Gaussian KDE distributions."""
     if other.d != self.d:
       raise ValueError("KDEs are not the same dimensionality")
 
@@ -190,13 +197,13 @@ class gaussian_kde:
                                      dtype=self.dataset.dtype).T
     return self.dataset[:, ind] + eps
 
-  @_wraps(osp_stats.gaussian_kde.pdf, update_doc=False)
   def pdf(self, x):
+    """Probability density function"""
     return self.evaluate(x)
 
-  @_wraps(osp_stats.gaussian_kde.logpdf, update_doc=False)
   def logpdf(self, x):
-    _check_arraylike("logpdf", x)
+    """Log probability density function"""
+    check_arraylike("logpdf", x)
     x = self._reshape_points(x)
     result = _gaussian_kernel_eval(True, self.dataset.T, self.weights[:, None],
                                    x.T, self.inv_cov)
@@ -239,7 +246,7 @@ def _gaussian_kernel_convolve(chol, norm, target, weights, mean):
 
 @partial(jit, static_argnums=0)
 def _gaussian_kernel_eval(in_log, points, values, xi, precision):
-  points, values, xi, precision = _promote_dtypes_inexact(
+  points, values, xi, precision = promote_dtypes_inexact(
       points, values, xi, precision)
   d = points.shape[1]
 

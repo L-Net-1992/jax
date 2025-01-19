@@ -12,18 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_python//python:defs.bzl", "py_library")
+
 # Note: these examples were imported May 26, 2022 and may be out of sync.
 licenses(["notice"])
 
-package(default_visibility = ["//third_party/py/jax/experimental/jax2tf:__subpackages__"])
+package(
+    default_applicable_licenses = [],
+    default_visibility = [
+        "//jax/experimental/jax2tf:__subpackages__",
+        "//third_party/tensorflow/lite/experimental/mlir/testing/jax/test_models:__subpackages__",
+    ],
+)
 
 py_library(
     name = "flax_models",
     srcs = glob(["*.py"]),
     srcs_version = "PY3",
     deps = [
+        "//jax",
         "//third_party/py/flax:core",
-        "//third_party/py/jax",
         "//third_party/py/jraph",
         "//third_party/py/numpy",
         "//third_party/py/typing_extensions",

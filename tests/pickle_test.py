@@ -26,15 +26,13 @@ except ImportError:
 
 import jax
 from jax import numpy as jnp
-from jax.config import config
 from jax.interpreters import pxla
-from jax.interpreters import xla
 from jax._src import test_util as jtu
 from jax._src.lib import xla_client as xc
 
 import numpy as np
 
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 def _get_device_by_id(device_id: int) -> xc.Device:
@@ -99,7 +97,7 @@ class CloudpickleTest(jtu.JaxTestCase):
 
 class PickleTest(jtu.JaxTestCase):
 
-  def testPickleOfDeviceArray(self):
+  def testPickleOfArray(self):
     x = jnp.arange(10.0)
     s = pickle.dumps(x)
     y = pickle.loads(s)
@@ -107,7 +105,7 @@ class PickleTest(jtu.JaxTestCase):
     self.assertIsInstance(y, type(x))
     self.assertEqual(x.aval, y.aval)
 
-  def testPickleOfDeviceArrayWeakType(self):
+  def testPickleOfArrayWeakType(self):
     x = jnp.array(4.0)
     self.assertEqual(x.aval.weak_type, True)
     s = pickle.dumps(x)
@@ -123,8 +121,9 @@ class PickleTest(jtu.JaxTestCase):
       s  = pickle.dumps(k1)
       k2 = pickle.loads(s)
       self.assertEqual(k1.dtype, k2.dtype)
-      self.assertArraysEqual(jax.random.key_data(k1),
-                             jax.random.key_data(k2))
+      with jax.legacy_prng_key('allow'):
+        self.assertArraysEqual(jax.random.key_data(k1),
+                              jax.random.key_data(k2))
 
   @parameterized.parameters(
       (jax.sharding.PartitionSpec(),),
@@ -164,12 +163,13 @@ class PickleTest(jtu.JaxTestCase):
     self.assertEqual(pickle.loads(pickle.dumps(sharding)), sharding)
 
   def testPickleOpSharding(self):
-    sharding = pxla.ShardingSpec((pxla.NoSharding(), pxla.Chunked((2, 2))),
-                                 (pxla.ShardedAxis(0), pxla.ShardedAxis(1)))
-    op_sharding = sharding.sharding_proto()
+    op = xc.OpSharding()
+    op.type = xc.OpSharding.Type.OTHER
+    op.tile_assignment_dimensions = [4, 2]
+    op.tile_assignment_devices = [0, 1, 2, 3, 4, 5, 6, 7]
     self.assertTrue(
-        xc.HloSharding.from_proto(pickle.loads(pickle.dumps(op_sharding))),
-        xc.HloSharding.from_proto(op_sharding))
+        xc.HloSharding.from_proto(pickle.loads(pickle.dumps(op))),
+        xc.HloSharding.from_proto(op))
 
   def test_pickle_single_device_sharding(self):
     s = jax.sharding.SingleDeviceSharding(jax.devices()[0])
@@ -183,9 +183,7 @@ class PickleTest(jtu.JaxTestCase):
     self.assertEqual(s, pickle.loads(pickle.dumps(s)))
 
   def test_pickle_gspmd_sharding(self):
-    op_sharding = xla.xc.OpSharding()
-    op_sharding.type = xla.xc.OpSharding.Type.REPLICATED
-    s = jax.sharding.GSPMDSharding(jax.devices(), op_sharding)
+    s = jax.sharding.GSPMDSharding.get_replicated(jax.devices())
     self.assertEqual(s, pickle.loads(pickle.dumps(s)))
 
   @unittest.skipIf(cloudpickle is None, "Requires cloudpickle")

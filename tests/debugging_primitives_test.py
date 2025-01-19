@@ -19,16 +19,12 @@ import unittest
 from absl.testing import absltest
 import jax
 from jax import lax
-from jax.config import config
-from jax.experimental import maps
 from jax.experimental import pjit
 from jax.interpreters import pxla
-from jax._src import sharding
 from jax._src import ad_checkpoint
 from jax._src import debugging
 from jax._src import dispatch
 from jax._src import test_util as jtu
-from jax._src import xla_bridge
 import jax.numpy as jnp
 import numpy as np
 
@@ -37,30 +33,33 @@ try:
 except ModuleNotFoundError:
   rich = None
 
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
+jtu.request_cpu_devices(2)
 
 debug_print = debugging.debug_print
 
 def _format_multiline(text):
   return textwrap.dedent(text).lstrip()
 
-prev_xla_flags = None
-
-def setUpModule():
-  global prev_xla_flags
-  # This will control the CPU devices. On TPU we always have 2 devices
-  prev_xla_flags = jtu.set_host_platform_device_count(2)
-
-# Reset to previous configuration in case other test modules will be run.
-def tearDownModule():
-  prev_xla_flags()
 
 class DummyDevice:
   def __init__(self, platform, id):
     self.platform = platform
     self.id = id
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
+
+class DebugCallbackTest(jtu.JaxTestCase):
+
+  def tearDown(self):
+    super().tearDown()
+    dispatch.runtime_tokens.clear()
+
+  def test_error_with_non_callable(self):
+    with self.assertRaisesRegex(TypeError, "callable"):
+      jax.debug.callback("this is not debug.print!")
+
+
+@jtu.thread_unsafe_test_class()  # printing isn't thread-safe
 class DebugPrintTest(jtu.JaxTestCase):
 
   def tearDown(self):
@@ -74,6 +73,18 @@ class DebugPrintTest(jtu.JaxTestCase):
       f(2)
       jax.effects_barrier()
     self.assertEqual(output(), "x: 2\n")
+
+  def test_static_args(self):
+    @jax.jit
+    def f(arr):
+      jax.debug.print("arr {array}, dtype: {dtype}, arr {array2}",
+                      array=arr, dtype=arr.dtype, array2=arr)
+    arr = jnp.array([1, 2, 3], dtype=jnp.float32)
+    with jtu.capture_stdout() as output:
+      f(arr)
+      jax.effects_barrier()
+    self.assertEqual(
+        output(), "arr [1. 2. 3.], dtype: float32, arr [1. 2. 3.]\n")
 
   def test_debug_print_works_with_named_format_strings(self):
     def f(x):
@@ -93,9 +104,6 @@ class DebugPrintTest(jtu.JaxTestCase):
     self.assertEqual(output(), "x: 2\ny: 3\n")
 
   def test_can_stage_out_debug_print(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     @jax.jit
     def f(x):
       debug_print('x: {x}', x=x)
@@ -104,13 +112,18 @@ class DebugPrintTest(jtu.JaxTestCase):
       jax.effects_barrier()
     self.assertEqual(output(), "x: 2\n")
 
+  def test_can_stage_out_debug_print_with_formatting(self):
+    @jax.jit
+    def f(x):
+      debug_print('x: {x:.2f}', x=x)
+
+    with jtu.capture_stdout() as output:
+      f(2)
+      jax.effects_barrier()
+    self.assertEqual(output(), "x: 2.00\n")
+
+  @jtu.device_supports_buffer_donation()
   def test_can_stage_out_debug_print_with_donate_argnums(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
-    if jax.default_backend() not in {"gpu", "tpu"}:
-      raise unittest.SkipTest("Donate argnums not supported.")
-
     def f(x, y):
       debug_print('x: {x}', x=x)
       return x + y
@@ -121,9 +134,6 @@ class DebugPrintTest(jtu.JaxTestCase):
     self.assertEqual(output(), "x: 2\n")
 
   def test_can_stage_out_ordered_print(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     @jax.jit
     def f(x):
       debug_print('x: {x}', x=x, ordered=True)
@@ -132,13 +142,8 @@ class DebugPrintTest(jtu.JaxTestCase):
       jax.effects_barrier()
     self.assertEqual(output(), "x: 2\n")
 
+  @jtu.device_supports_buffer_donation()
   def test_can_stage_out_ordered_print_with_donate_argnums(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
-    if jax.default_backend() not in {"gpu", "tpu"}:
-      raise unittest.SkipTest("Donate argnums not supported.")
-
     def f(x, y):
       debug_print('x: {x}', x=x, ordered=True)
       return x + y
@@ -148,13 +153,8 @@ class DebugPrintTest(jtu.JaxTestCase):
       jax.effects_barrier()
     self.assertEqual(output(), "x: 2\n")
 
+  @jtu.device_supports_buffer_donation()
   def test_can_stage_out_prints_with_donate_argnums(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
-    if jax.default_backend() not in {"gpu", "tpu"}:
-      raise unittest.SkipTest("Donate argnums not supported.")
-
     def f(x, y):
       debug_print('x: {x}', x=x, ordered=True)
       debug_print('x: {x}', x=x)
@@ -166,9 +166,6 @@ class DebugPrintTest(jtu.JaxTestCase):
     self.assertEqual(output(), "x: 2\nx: 2\n")
 
   def test_can_double_stage_out_ordered_print(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     @jax.jit
     @jax.jit
     def f(x):
@@ -179,9 +176,6 @@ class DebugPrintTest(jtu.JaxTestCase):
     self.assertEqual(output(), "x: 2\n")
 
   def test_can_stage_out_ordered_print_with_pytree(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     @jax.jit
     def f(x):
       struct = dict(foo=x)
@@ -189,11 +183,9 @@ class DebugPrintTest(jtu.JaxTestCase):
     with jtu.capture_stdout() as output:
       f(np.array(2, np.int32))
       jax.effects_barrier()
-    self.assertEqual(output(), f"x: {str(dict(foo=np.array(2, np.int32)))}\n")
+    self.assertEqual(output(), f"x: {str(dict(foo=jnp.array(2, np.int32)))}\n")
 
   def test_debug_print_should_use_default_layout(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
     data = np.array(
         [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14],
          [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14],
@@ -221,8 +213,31 @@ class DebugPrintTest(jtu.JaxTestCase):
          [ 1  2  3  4  5  6  7  8  9 10 12 13 14]]
     """))
 
+  def test_debug_print_respects_numpy_printoptions(self):
+    def f(x):
+      with np.printoptions(precision=2, suppress=True):
+        jax.debug.print("{}", x)
+    x = np.array([1.2345, 2.3456, 1E-7])
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
+    # Default numpy print options:
+    with jtu.capture_stdout() as output:
+      jax.debug.print("{}", x)
+    self.assertEqual(output(), "[1.2345e+00 2.3456e+00 1.0000e-07]\n")
+
+    # Modified print options without JIT:
+    with jtu.capture_stdout() as output:
+      f(x)
+      jax.effects_barrier()
+    self.assertEqual(output(), "[1.23 2.35 0.  ]\n")
+
+    # Modified print options with JIT:
+    with jtu.capture_stdout() as output:
+      jax.jit(f)(x)
+      jax.effects_barrier()
+    self.assertEqual(output(), "[1.23 2.35 0.  ]\n")
+
+
+@jtu.thread_unsafe_test_class()  # printing isn't thread-safe
 class DebugPrintTransformationTest(jtu.JaxTestCase):
 
   def test_debug_print_batching(self):
@@ -440,9 +455,6 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
     self.assertEqual(output(), "y: 3.0, z: 6.0\n" * 2)
 
   def test_debug_print_in_staged_out_custom_jvp(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     @jax.jit
     def f(x):
       @jax.custom_jvp
@@ -467,9 +479,6 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
     self.assertEqual(output(), "goodbye: 2.0 3.0\n")
 
   def test_debug_print_in_staged_out_custom_vjp(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     @jax.jit
     def f(x):
       @jax.custom_vjp
@@ -500,7 +509,7 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
       jax.effects_barrier()
     self.assertEqual(output(), "hello bwd: 2.0 3.0\n")
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
+@jtu.thread_unsafe_test_class()  # printing isn't thread-safe
 class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   def _assertLinesEqual(self, text1, text2):
@@ -512,9 +521,6 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   @jtu.sample_product(ordered=[False, True])
   def test_can_print_inside_scan(self, ordered):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(xs):
       def _body(carry, x):
         debug_print("carry: {carry}, x: {x}", carry=carry, x=x, ordered=ordered)
@@ -532,9 +538,6 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   @jtu.sample_product(ordered=[False, True])
   def test_can_print_inside_for_loop(self, ordered):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       def _body(i, x):
         debug_print("i: {i}", i=i, ordered=ordered)
@@ -563,9 +566,6 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   @jtu.sample_product(ordered=[False, True])
   def test_can_print_inside_while_loop_body(self, ordered):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       def _cond(x):
         return x < 10
@@ -586,9 +586,6 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   @jtu.sample_product(ordered=[False, True])
   def test_can_print_inside_while_loop_cond(self, ordered):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       def _cond(x):
         debug_print("x: {x}", x=x, ordered=ordered)
@@ -618,9 +615,6 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   @jtu.sample_product(ordered=[False, True])
   def test_can_print_in_batched_while_cond(self, ordered):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       def _cond(x):
         debug_print("x: {x}", x=x, ordered=ordered)
@@ -678,9 +672,6 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   @jtu.sample_product(ordered=[False, True])
   def test_can_print_inside_cond(self, ordered):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       def true_fun(x):
         debug_print("true: {}", x, ordered=ordered)
@@ -704,9 +695,6 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
   @jtu.sample_product(ordered=[False, True])
   def test_can_print_inside_switch(self, ordered):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       def b1(x):
         debug_print("b1: {}", x, ordered=ordered)
@@ -737,7 +725,7 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       b3: 2
       """))
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
+@jtu.thread_unsafe_test_class()  # printing isn't thread-safe
 class DebugPrintParallelTest(jtu.JaxTestCase):
 
   def _assertLinesEqual(self, text1, text2):
@@ -757,9 +745,6 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
       f(jnp.arange(jax.local_device_count()))
 
   def test_unordered_print_works_in_pmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices.")
 
@@ -782,19 +767,12 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
     self._assertLinesEqual(output(), "hello: 0\nhello: 1\nhello: 2\nhello: 3\n")
 
   def test_unordered_print_with_pjit(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       debug_print("{}", x, ordered=False)
       return x
     mesh = jax.sharding.Mesh(np.array(jax.devices()), ['dev'])
-    if config.jax_array:
-      spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
-      out_spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-    else:
-      spec = jax.sharding.PartitionSpec('dev')
-      out_spec = jax.sharding.PartitionSpec()
+    spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
+    out_spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     f = pjit.pjit(f, in_shardings=spec, out_shardings=out_spec)
     with mesh:
       with jtu.capture_stdout() as output:
@@ -814,13 +792,6 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
       self.assertEqual(output(), "140\n")
 
   def test_nested_pjit_debug_print(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise self.skipTest(
-          'Host callback not supported for runtime type: stream_executor.')
-
-    if not jax.config.jax_array:
-      self.skipTest("This test only works with jax.Array.")
-
     def f(x):
       debug_print("{}", x)
       return x
@@ -831,9 +802,6 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
     self.assertEqual(output(), "[0 1 2 3 4 5 6 7]\n")
 
   def test_unordered_print_of_pjit_of_while(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     def f(x):
       def cond(carry):
         i, *_ = carry
@@ -846,10 +814,7 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
       return lax.while_loop(cond, body, (0, x))[1]
 
     mesh = jax.sharding.Mesh(np.array(jax.devices()), ['dev'])
-    if config.jax_array:
-      spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
-    else:
-      spec = jax.sharding.PartitionSpec('dev')
+    spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
     f = pjit.pjit(f, in_shardings=spec, out_shardings=spec)
     with mesh:
       with jtu.capture_stdout() as output:
@@ -862,53 +827,7 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
           "[ 3  4  5  6  7  8  9 10]\n"
           "[ 4  5  6  7  8  9 10 11]\n")
 
-  def test_unordered_print_of_pjit_of_xmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
-    def f(x):
-      def foo(x):
-        idx = lax.axis_index('foo')
-        debug_print("{idx}: {x}", idx=idx, x=x)
-        return jnp.mean(x, axis=['foo'])
-      out = maps.xmap(foo, in_axes=['foo'], out_axes=[...])(x)
-      debug_print("Out: {}", out)
-      return out
-    mesh = jax.sharding.Mesh(np.array(jax.devices()), ['dev'])
-    if config.jax_array:
-      in_spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
-      out_spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-    else:
-      in_spec = jax.sharding.PartitionSpec('dev')
-      out_spec = jax.sharding.PartitionSpec()
-    f = pjit.pjit(f, in_shardings=in_spec, out_shardings=out_spec)
-    with mesh:
-      with jtu.capture_stdout() as output:
-        f(jnp.arange(8, dtype=jnp.int32) * 2)
-        lines = ["0: 0", "1: 2", "2: 4", "3: 6", "4: 8", "5: 10", "6: 12",
-                 "7: 14", "Out: 7.0", ""]
-        jax.effects_barrier()
-        self._assertLinesEqual(output(), "\n".join(lines))
-
-  def test_unordered_print_with_xmap(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
-    def f(x):
-      debug_print("{}", x, ordered=False)
-    f = maps.xmap(f, in_axes=['a'], out_axes=None, backend='cpu',
-                  axis_resources={'a': 'dev'})
-    with jax.sharding.Mesh(np.array(jax.devices()), ['dev']):
-      with jtu.capture_stdout() as output:
-        f(np.arange(40))
-        jax.effects_barrier()
-      lines = [f"{i}\n" for i in range(40)]
-      self._assertLinesEqual(output(), "".join(lines))
-
   def test_unordered_print_works_in_pmap_of_while(self):
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices.")
 
@@ -980,7 +899,7 @@ class DebugPrintParallelTest(jtu.JaxTestCase):
       f(jnp.arange(2))
       jax.effects_barrier()
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
+@jtu.thread_unsafe_test_class()  # logging isn't thread-safe
 class VisualizeShardingTest(jtu.JaxTestCase):
 
   def _create_devices(self, shape):
@@ -991,7 +910,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
   def test_trivial_sharding(self):
     mesh = jax.sharding.Mesh(self._create_devices(1), ['x'])
     pspec = jax.sharding.PartitionSpec('x')
-    sd = sharding.NamedSharding(mesh, pspec)
+    sd = jax.sharding.NamedSharding(mesh, pspec)
     shape = (5,)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd)
@@ -1004,7 +923,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
   def test_trivial_sharding_with_scale(self):
     mesh = jax.sharding.Mesh(self._create_devices(1), ['x'])
     pspec = jax.sharding.PartitionSpec('x')
-    sd = sharding.NamedSharding(mesh, pspec)
+    sd = jax.sharding.NamedSharding(mesh, pspec)
     shape = (5,)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd, scale=8.)
@@ -1017,7 +936,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
   def test_full_sharding(self):
     mesh = jax.sharding.Mesh(self._create_devices((8, 4)), ['x', 'y'])
     pspec = jax.sharding.PartitionSpec('x', 'y')
-    sd = sharding.NamedSharding(mesh, pspec)
+    sd = jax.sharding.NamedSharding(mesh, pspec)
     shape = (8, 8)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd)
@@ -1047,7 +966,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
     mesh = jax.sharding.Mesh(self._create_devices((8, 4)), ['x', 'y'])
 
     pspec = jax.sharding.PartitionSpec('x', None)
-    sd = sharding.NamedSharding(mesh, pspec)
+    sd = jax.sharding.NamedSharding(mesh, pspec)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd)
     expected = _format_multiline("""
@@ -1073,7 +992,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
 
     mesh = jax.sharding.Mesh(self._create_devices((4, 2)), ['x', 'y'])
     pspec = jax.sharding.PartitionSpec(None, 'y')
-    sd = sharding.NamedSharding(mesh, pspec)
+    sd = jax.sharding.NamedSharding(mesh, pspec)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd)
     expected = _format_multiline("""
@@ -1096,7 +1015,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
     mesh = jax.sharding.Mesh(self._create_devices((8, 4)), ['x', 'y'])
 
     pspec = jax.sharding.PartitionSpec('x', None)
-    sd = sharding.NamedSharding(mesh, pspec)
+    sd = jax.sharding.NamedSharding(mesh, pspec)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd)
     expected = _format_multiline("""
@@ -1124,7 +1043,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
     ss = pxla.ShardingSpec(
         sharding=(pxla.Unstacked(8),),
         mesh_mapping=(pxla.ShardedAxis(0),))
-    sd = sharding.PmapSharding(self._create_devices(8), ss)
+    sd = jax.sharding.PmapSharding(self._create_devices(8), ss)
     shape = (8,)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd)
@@ -1138,7 +1057,7 @@ class VisualizeShardingTest(jtu.JaxTestCase):
     ss = pxla.ShardingSpec(
         sharding=(pxla.Unstacked(8), pxla.NoSharding()),
         mesh_mapping=(pxla.ShardedAxis(0),))
-    sd = sharding.PmapSharding(self._create_devices(8), ss)
+    sd = jax.sharding.PmapSharding(self._create_devices(8), ss)
     shape = (8, 2)
     with jtu.capture_stdout() as output:
       debugging.visualize_sharding(shape, sd)
@@ -1163,7 +1082,6 @@ class VisualizeShardingTest(jtu.JaxTestCase):
     """)
     self.assertEqual(output(), expected)
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
 class InspectShardingTest(jtu.JaxTestCase):
 
   def test_inspect_sharding_is_called_in_pjit(self):
@@ -1175,7 +1093,7 @@ class InspectShardingTest(jtu.JaxTestCase):
     def _cb(sd):
       nonlocal is_called
       is_called = True
-      self.assertIsInstance(sd, sharding.Sharding)
+      self.assertIsInstance(sd, jax.sharding.Sharding)
       self.assertLen(sd.device_set, len(jax.devices()))
 
     def f(x):
@@ -1183,12 +1101,8 @@ class InspectShardingTest(jtu.JaxTestCase):
       return jnp.square(x)
 
     mesh = jax.sharding.Mesh(np.array(jax.devices()), ['dev'])
-    if config.jax_array:
-      spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
-      out_spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-    else:
-      spec = jax.sharding.PartitionSpec('dev')
-      out_spec = jax.sharding.PartitionSpec()
+    spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dev'))
+    out_spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     f = pjit.pjit(f, in_shardings=spec, out_shardings=out_spec)
     with mesh:
       f(np.arange(8, dtype=jnp.int32))
@@ -1196,23 +1110,59 @@ class InspectShardingTest(jtu.JaxTestCase):
 
   def test_inspect_sharding_is_called_in_jit(self):
 
-    if not config.jax_array:
-      raise unittest.SkipTest("jax_array to work inside of `jit`.")
-
     is_called = False
     def _cb(sd):
       nonlocal is_called
       is_called = True
-      self.assertIsInstance(sd, sharding.Sharding)
+      self.assertIsInstance(sd, jax.sharding.Sharding)
       self.assertLen(sd.device_set, 1)
 
-    def f(x):
+    def f_(x):
       debugging.inspect_array_sharding(x, callback=_cb)
       return jnp.square(x)
 
-    f = jax.jit(f)
+    f = jax.jit(f_)
     f(np.arange(8, dtype=jnp.int32))
     self.assertTrue(is_called)
+
+    # Test in grad
+    is_called = False
+    f = jax.jit(jax.grad(lambda x: f_(x).sum()))
+    f(np.arange(8, dtype=jnp.float32))
+    self.assertTrue(is_called)
+
+  def test_inspect_sharding_3d_jit(self):
+    def _cb(sd):
+      self.assertIsInstance(sd, jax.sharding.NamedSharding)
+      self.assertLen(sd.device_set, 2)
+
+    def f_(x):
+      debugging.inspect_array_sharding(x, callback=_cb)
+      return jnp.square(x)
+
+    f = jax.jit(f_)
+    mesh = jtu.create_mesh((2,), ('x'))
+    s = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('x'))
+    arr = jax.device_put(np.arange(8).reshape(2, 2, 2), s)
+
+    f(arr)
+
+  def test_inspect_sharding_3d_pjit(self):
+    def _cb(sd):
+      self.assertIsInstance(sd, jax.sharding.NamedSharding)
+      self.assertLen(sd.device_set, 2)
+
+    def f_(x):
+      debugging.inspect_array_sharding(x, callback=_cb)
+      return jnp.square(x)
+
+    f = pjit.pjit(f_)
+    mesh = jtu.create_mesh((2,), ('x'))
+    s = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('x'))
+    arr = jax.device_put(np.arange(8).reshape(2, 2, 2), s)
+
+    with mesh:
+      f(arr)
 
 
 if not rich:

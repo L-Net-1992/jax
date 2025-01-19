@@ -16,32 +16,12 @@ limitations under the License.
 #ifndef JAXLIB_CUSOLVER_KERNELS_H_
 #define JAXLIB_CUSOLVER_KERNELS_H_
 
-#include "absl/status/statusor.h"
-#include "jaxlib/gpu/vendor.h"
-#include "jaxlib/handle_pool.h"
-#include "tensorflow/compiler/xla/service/custom_call_status.h"
+#include <cstddef>
 
-#ifdef JAX_GPU_CUDA
-#include "third_party/gpus/cuda/include/cusolverSp.h"
-#endif  // JAX_GPU_CUDA
+#include "jaxlib/gpu/vendor.h"
+#include "xla/service/custom_call_status.h"
 
 namespace jax {
-
-using SolverHandlePool = HandlePool<gpusolverDnHandle_t, gpuStream_t>;
-
-template <>
-absl::StatusOr<SolverHandlePool::Handle> SolverHandlePool::Borrow(
-    gpuStream_t stream);
-
-#ifdef JAX_GPU_CUDA
-
-using SpSolverHandlePool = HandlePool<cusolverSpHandle_t, gpuStream_t>;
-
-template <>
-absl::StatusOr<SpSolverHandlePool::Handle> SpSolverHandlePool::Borrow(
-    gpuStream_t stream);
-
-#endif  // JAX_GPU_CUDA
 
 namespace JAX_GPU_NAMESPACE {
 
@@ -103,7 +83,7 @@ void Orgqr(gpuStream_t stream, void** buffers, const char* opaque,
 struct SyevdDescriptor {
   SolverType type;
   gpusolverFillMode_t uplo;
-  int batch, n;
+  int batch, n;  // batch may be -1 in which case it is passed as operand.
   int lwork;
 };
 

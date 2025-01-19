@@ -13,19 +13,39 @@
 # limitations under the License.
 
 
-import scipy.stats as osp_stats
 from jax import lax
-from jax._src.numpy import lax_numpy as jnp
-from jax._src.numpy.util import _wraps, _promote_args_inexact, _promote_args_numeric
+import jax.numpy as jnp
+from jax._src.numpy.util import promote_args_inexact, promote_args_numeric
 from jax._src.scipy.special import gammaln, xlogy
 from jax._src.typing import Array, ArrayLike
 
 
-@_wraps(osp_stats.multinomial.logpmf, update_doc=False)
 def logpmf(x: ArrayLike, n: ArrayLike, p: ArrayLike) -> Array:
-  """JAX implementation of scipy.stats.multinomial.logpmf."""
-  p, = _promote_args_inexact("multinomial.logpmf", p)
-  x, n = _promote_args_numeric("multinomial.logpmf", x, n)
+  r"""Multinomial log probability mass function.
+
+  JAX implementation of :obj:`scipy.stats.multinomial` ``logpdf``.
+
+  The multinomial probability distribution is given by
+
+  .. math::
+
+     f(x, n, p) = n! \prod_{i=1}^k \frac{p_i^{x_i}}{x_i!}
+
+  with :math:`n = \sum_i x_i`.
+
+  Args:
+    x: arraylike, value at which to evaluate the PMF
+    n: arraylike, distribution shape parameter
+    p: arraylike, distribution shape parameter
+
+  Returns:
+    array of logpmf values.
+
+  See Also:
+    :func:`jax.scipy.stats.multinomial.pmf`
+  """
+  p, = promote_args_inexact("multinomial.logpmf", p)
+  x, n = promote_args_numeric("multinomial.logpmf", x, n)
   if not jnp.issubdtype(x.dtype, jnp.integer):
     raise ValueError(f"x and n must be of integer type; got x.dtype={x.dtype}, n.dtype={n.dtype}")
   x = x.astype(p.dtype)
@@ -34,7 +54,28 @@ def logpmf(x: ArrayLike, n: ArrayLike, p: ArrayLike) -> Array:
   return jnp.where(jnp.equal(jnp.sum(x), n), logprobs, -jnp.inf)
 
 
-@_wraps(osp_stats.multinomial.pmf, update_doc=False)
 def pmf(x: ArrayLike, n: ArrayLike, p: ArrayLike) -> Array:
-  """JAX implementation of scipy.stats.multinomial.pmf."""
+  r"""Multinomial probability mass function.
+
+  JAX implementation of :obj:`scipy.stats.multinomial` ``pmf``.
+
+  The multinomial probability distribution is given by
+
+  .. math::
+
+     f(x, n, p) = n! \prod_{i=1}^k \frac{p_i^{x_i}}{x_i!}
+
+  with :math:`n = \sum_i x_i`.
+
+  Args:
+    x: arraylike, value at which to evaluate the PMF
+    n: arraylike, distribution shape parameter
+    p: arraylike, distribution shape parameter
+
+  Returns:
+    array of pmf values
+
+  See Also:
+    :func:`jax.scipy.stats.multinomial.logpmf`
+  """
   return lax.exp(logpmf(x, n, p))

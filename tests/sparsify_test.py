@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from functools import partial
+import math
 import operator
 
 from absl.testing import absltest
@@ -21,21 +22,21 @@ from absl.testing import parameterized
 import numpy as np
 
 import jax
-from jax import config, jit, lax
+from jax import jit, lax
 import jax.numpy as jnp
 import jax._src.test_util as jtu
-from jax.experimental.sparse import BCOO, sparsify, todense, SparseTracer
+from jax.experimental.sparse import BCOO, BCSR, sparsify, todense, SparseTracer
 from jax.experimental.sparse.transform import (
   arrays_to_spvalues, spvalues_to_arrays, sparsify_raw, SparsifyValue, SparsifyEnv)
 from jax.experimental.sparse.util import CuSparseEfficiencyWarning
 from jax.experimental.sparse import test_util as sptu
 
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 def rand_sparse(rng, nse=0.5, post=lambda x: x, rand_method=jtu.rand_default):
   def _rand_sparse(shape, dtype, nse=nse):
     rand = rand_method(rng)
-    size = np.prod(shape).astype(int)
+    size = math.prod(shape)
     if 0 <= nse < 1:
       nse = nse * size
     nse = min(size, int(nse))
@@ -161,27 +162,29 @@ class SparsifyTest(jtu.JaxTestCase):
 
     self.assertAllClose(result_sparse.todense(), result_dense)
 
+  @jax.numpy_dtype_promotion('standard')
   def testSparseMatmul(self):
-    X = jnp.arange(16.0).reshape(4, 4)
+    X = jnp.arange(16.0, dtype='float32').reshape(4, 4)
     Xsp = BCOO.fromdense(X)
-    Y = jnp.ones(4)
+    Y = jnp.ones(4, dtype='int32')
     Ysp = BCOO.fromdense(Y)
 
-    func = self.sparsify(operator.matmul)
+    # Note: deliberately testing with mixed precision
+    assert Xsp.dtype != Ysp.dtype
 
     # dot_general
-    result_sparse = func(Xsp, Y)
-    result_dense = operator.matmul(X, Y)
+    result_sparse =  self.sparsify(lax.dot)(Xsp, Y)
+    result_dense = lax.dot(X, Y)
     self.assertAllClose(result_sparse, result_dense)
 
     # rdot_general
-    result_sparse = func(Y, Xsp)
-    result_dense = operator.matmul(Y, X)
+    result_sparse =  self.sparsify(lax.dot)(Y, Xsp)
+    result_dense = lax.dot(Y, X)
     self.assertAllClose(result_sparse, result_dense)
 
-  # spdot_general
-    result_sparse = self.sparsify(operator.matmul)(Xsp, Ysp)
-    result_dense = operator.matmul(X, Y)
+    # spdot_general
+    result_sparse = self.sparsify(lax.dot)(Xsp, Ysp)
+    result_dense = lax.dot(X, Y)
     self.assertAllClose(result_sparse.todense(), result_dense)
 
   def testSparseAdd(self):
@@ -205,6 +208,21 @@ class SparsifyTest(jtu.JaxTestCase):
     out, = spvalues_to_arrays(spenv, args_out)
 
     self.assertAllClose(out.todense(), x.todense() + y.todense())
+
+    # Sparse + dense: supported
+    x = BCOO.fromdense(jnp.arange(6.)).reshape(2, 3)
+    y = jnp.ones((2, 3))
+
+    out = self.sparsify(operator.add)(x, y)
+    self.assertAllClose(out, x.todense() + y)
+
+    out = self.sparsify(operator.add)(y, x)
+    self.assertAllClose(out, x.todense() + y)
+
+    # Sparse + dense: unsupported
+    msg = "Addition between a sparse array X and a dense array Y is not implemented"
+    with self.assertRaisesRegex(NotImplementedError, msg):
+      self.sparsify(operator.add)(x, 1.)
 
   @jtu.sample_product(
     [dict(shape=shape, n_batch=n_batch, n_dense=n_dense)
@@ -240,6 +258,33 @@ class SparsifyTest(jtu.JaxTestCase):
 
     self.assertAllClose(out.todense(), x.todense() * y.todense())
 
+  @jtu.sample_product(
+    [dict(shape=shape, n_batch=n_batch, n_dense=n_dense)
+      for shape in [(5,), (5, 8), (8, 5), (3, 4, 5), (3, 4, 3, 2)]
+      for n_batch in range(len(shape) + 1)
+      for n_dense in range(len(shape) + 1 - n_batch)
+    ],
+    dtype=jtu.dtypes.integer + jtu.dtypes.floating + jtu.dtypes.complex,
+  )
+  def testSparseDiv(self, shape, dtype, n_batch, n_dense):
+    rng_dense = jtu.rand_nonzero(self.rng())
+    rng_sparse = rand_sparse(self.rng(), rand_method=jtu.rand_some_zero)
+    x = BCOO.fromdense(rng_sparse(shape, dtype), n_batch=n_batch,
+                       n_dense=n_dense)
+    spdiv = self.sparsify(operator.truediv)
+
+    # Scalar division
+    divisor = 2
+    expected = x.todense() / divisor
+    self.assertAllClose(expected, spdiv(x, divisor).todense())
+    self.assertAllClose(expected,  (x / divisor).todense())
+
+    # Array division
+    divisor = rng_dense(shape, dtype)
+    expected = x.todense() / divisor
+    self.assertAllClose(expected, spdiv(x, divisor).todense())
+    self.assertAllClose(expected,  (x / divisor).todense())
+
   def testSparseSubtract(self):
     x = BCOO.fromdense(3 * jnp.arange(5))
     y = BCOO.fromdense(jnp.arange(5))
@@ -261,6 +306,19 @@ class SparsifyTest(jtu.JaxTestCase):
     out, = spvalues_to_arrays(spenv, args_out)
 
     self.assertAllClose(out.todense(), x.todense() - y.todense())
+
+  def testSparsePow(self):
+    x = jnp.arange(20.0).reshape(4, 5)
+    xsp = BCOO.fromdense(x)
+
+    result_dense = x ** 2
+    result_sparse = xsp ** 2
+
+    self.assertAllClose(result_dense, result_sparse.todense())
+
+    with self.assertRaisesRegex(NotImplementedError,
+                                "sparse rule for integer_pow with non-positive exponent"):
+      _ = xsp ** -1
 
   def testSparseSum(self):
     x = jnp.arange(20).reshape(4, 5)
@@ -502,15 +560,28 @@ class SparsifyTest(jtu.JaxTestCase):
     func(x, y)  # No error
     func(x_bcoo, y_bcoo)  # No error
 
-    with self.assertRaisesRegex(TypeError, "sparsified true_fun and false_fun output.*"):
+    with self.assertRaisesRegex(
+        TypeError,
+        "sparsified true_fun output must have same type structure as sparsified false_fun output.*"):
       func(x_bcoo, y)
 
-  def testToDense(self):
-    M = jnp.arange(4)
-    Msp = BCOO.fromdense(M)
+  @parameterized.named_parameters(
+      {"testcase_name": f"_{fmt}", "fmt": fmt}
+      for fmt in ["BCSR", "BCOO"]
+  )
+  def testToDense(self, fmt):
+    M = jnp.arange(4).reshape(2, 2)
+    if fmt == "BCOO":
+      Msp = BCOO.fromdense(M)
+    elif fmt == "BCSR":
+      Msp = BCSR.fromdense(M)
+    else:
+      raise ValueError(f"Unrecognized {fmt=}")
+
     @self.sparsify
     def func(M):
       return todense(M) + 1
+
     self.assertArraysEqual(func(M), M + 1)
     self.assertArraysEqual(func(Msp), M + 1)
     self.assertArraysEqual(jit(func)(M), M + 1)
@@ -541,7 +612,7 @@ class SparsifyTest(jtu.JaxTestCase):
     self.assertArraysEqual(jit(func)(Msp).todense(), expected)
 
   def testWeakTypes(self):
-    # Regression test for https://github.com/google/jax/issues/8267
+    # Regression test for https://github.com/jax-ml/jax/issues/8267
     M = jnp.arange(12, dtype='int32').reshape(3, 4)
     Msp = BCOO.fromdense(M)
     self.assertArraysEqual(
@@ -556,6 +627,7 @@ class SparsifyTest(jtu.JaxTestCase):
       for fmt in ["BCSR", "BCOO"]
       for op, dtype, kwds in [
         (jnp.copy, jnp.float32, {}),
+        (lax.conj, jnp.complex64, {}),
         (lax.abs, jnp.float32, {}),
         (lax.asin, jnp.float32, {}),
         (lax.asinh, jnp.float32, {}),
@@ -573,7 +645,8 @@ class SparsifyTest(jtu.JaxTestCase):
         (lax.sqrt, jnp.float32, {}),
         (lax.tan, jnp.float32, {}),
         (lax.tanh, jnp.float32, {}),
-        (lax.convert_element_type, jnp.float32, {"new_dtype": np.dtype('complex64')})])
+        (lax.convert_element_type, jnp.float32, {"new_dtype": np.dtype('complex64')}),
+        (lax.integer_pow, jnp.float32, {'y': 2})])
   def testUnaryOperationsNonUniqueIndices(self, fmt, op, dtype, kwds):
     shape = (4, 5)
 
@@ -596,6 +669,24 @@ class SparsifyTest(jtu.JaxTestCase):
       self.assertArraysAllClose(sparse_result.indices, mat.indices)
       if fmt == "BCSR":
         self.assertArraysAllClose(sparse_result.indptr, mat.indptr)
+
+  def testCustomJVP(self):
+    square = jax.custom_derivatives.custom_jvp(lambda x: x ** 2)
+    square.defjvp(lambda p, t: (p[0] ** 2, 2 * t[0] * p[0]))
+    x = BCOO.fromdense(jnp.arange(5.0))
+
+    # Test calling the function itself.
+    result = self.sparsify(square)(x)
+    expected = self.sparsify(lambda x: x ** 2)(x)
+    self.assertArraysEqual(result.indices, expected.indices)
+    self.assertArraysAllClose(result.data, expected.data)
+
+    # Test evaluating the custom gradient.
+    grad_square_sum = jax.grad(lambda x: square(x).sum())
+    result = self.sparsify(grad_square_sum)(x)
+    expected = self.sparsify(jax.grad(lambda x: jnp.sum(x ** 2)))(x)
+    self.assertArraysEqual(result.indices, expected.indices)
+    self.assertArraysAllClose(result.data, expected.data)
 
 
 class SparsifyTracerTest(SparsifyTest):

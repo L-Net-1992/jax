@@ -17,17 +17,24 @@
 # only, and may be changed or removed at any time and without any deprecation
 # cycle.
 
-import collections
+from __future__ import annotations
 
+import collections
+import itertools
+from typing import Union, cast
+
+import jax
 from jax import lax
 from jax._src import dtypes
 from jax._src import test_util
+from jax._src.util import safe_map, safe_zip
 
 import numpy as np
 
-from jax.config import config
+jax.config.parse_flags_with_absl()
 
-config.parse_flags_with_absl()
+map, unsafe_map = safe_map, map
+zip, unsafe_zip = safe_zip, zip
 
 
 # For standard unops and binops, we can generate a large number of tests on
@@ -162,6 +169,7 @@ def lax_ops():
       ),
       op_record("is_finite", 1, float_dtypes, test_util.rand_small),
       op_record("exp", 1, float_dtypes + complex_dtypes, test_util.rand_small),
+      op_record("exp2", 1, float_dtypes + complex_dtypes, test_util.rand_small),
       # TODO(b/142975473): on CPU, expm1 for float64 is only accurate to ~float32
       # precision.
       op_record(
@@ -257,9 +265,7 @@ def lax_ops():
           float_dtypes,
           test_util.rand_positive,
           {
-              np.float32: (
-                  1e-3 if test_util.device_under_test() == "tpu" else 1e-5
-              ),
+              np.float32: 1e-5,
               np.float64: 1e-14,
           },
       ),
@@ -274,8 +280,11 @@ def lax_ops():
           "betainc",
           3,
           float_dtypes,
-          test_util.rand_positive,
-          {np.float64: 1e-14},
+          test_util.rand_uniform,
+          {
+              np.float32: 1e-5,
+              np.float64: 1e-12,
+          },
       ),
       op_record(
           "igamma",
@@ -345,3 +354,28 @@ def lax_ops():
       op_record("le", 2, default_dtypes, test_util.rand_small),
       op_record("lt", 2, default_dtypes, test_util.rand_small),
   ]
+
+
+def all_bdims(*shapes):
+  bdims = (itertools.chain([cast(Union[int, None], None)],
+                           range(len(shape) + 1)) for shape in shapes)
+  return (t for t in itertools.product(*bdims) if not all(e is None for e in t))
+
+
+def add_bdim(bdim_size, bdim, shape):
+  shape = list(shape)
+  if bdim is not None:
+    shape.insert(bdim, bdim_size)
+  return tuple(shape)
+
+
+def slicer(x, bdim):
+  if bdim is None:
+    return lambda _: x
+  else:
+    return lambda i: lax.index_in_dim(x, i, bdim, keepdims=False)
+
+
+def args_slicer(args, bdims):
+  slicers = map(slicer, args, bdims)
+  return lambda i: [sl(i) for sl in slicers]

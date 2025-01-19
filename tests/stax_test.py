@@ -18,18 +18,18 @@ from absl.testing import absltest
 
 import numpy as np
 
+import jax
 from jax._src import test_util as jtu
 from jax import random
 from jax.example_libraries import stax
 from jax import dtypes
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 def random_inputs(rng, input_shape):
   if type(input_shape) is tuple:
-    return rng.randn(*input_shape).astype(dtypes.canonicalize_dtype(np.float_))
+    return rng.randn(*input_shape).astype(dtypes.canonicalize_dtype(float))
   elif type(input_shape) is list:
     return [random_inputs(rng, shape) for shape in input_shape]
   else:
@@ -48,7 +48,8 @@ def _CheckShapeAgreement(test_case, init_fun, apply_fun, input_shape):
 
 
 # stax makes use of implicit rank promotion, so we allow it in the tests.
-@jtu.with_config(jax_numpy_rank_promotion="allow")
+@jtu.with_config(jax_numpy_rank_promotion="allow",
+                 jax_legacy_prng_key="allow")
 class StaxTest(jtu.JaxTestCase):
 
   @jtu.sample_product(shape=[(2, 3), (5,)])
@@ -215,7 +216,7 @@ class StaxTest(jtu.JaxTestCase):
 
   def testBatchNormShapeNCHW(self):
     key = random.PRNGKey(0)
-    # Regression test for https://github.com/google/jax/issues/461
+    # Regression test for https://github.com/jax-ml/jax/issues/461
     init_fun, apply_fun = stax.BatchNorm(axis=(0, 2, 3))
     input_shape = (4, 5, 6, 7)
 

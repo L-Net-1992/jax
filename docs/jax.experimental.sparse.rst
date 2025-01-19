@@ -1,6 +1,12 @@
 ``jax.experimental.sparse`` module
 ==================================
 
+.. note::
+
+   The methods in ``jax.experimental.sparse`` are experimental reference
+   implementations, and not recommended for use in performance-critical
+   applications.
+
 .. automodule:: jax.experimental.sparse
 
 .. currentmodule:: jax.experimental.sparse
@@ -89,3 +95,16 @@ but not with batching transforms like :func:`jax.vmap`.
    csr_matmat
    csr_matvec
    csr_todense
+
+``jax.experimental.sparse.linalg``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: jax.experimental.sparse.linalg
+
+.. currentmodule:: jax.experimental.sparse.linalg
+
+.. autosummary::
+   :toctree: _autosummary
+
+   spsolve
+   lobpcg_standard

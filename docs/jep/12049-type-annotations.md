@@ -12,7 +12,7 @@ The current state of type annotations in JAX is a bit patchwork, and efforts to 
 This doc attempts to summarize those issues and generate a roadmap for the goals and non-goals of type annotations in JAX.
 
 Why do we need such a roadmap? Better/more comprehensive type annotations are a frequent request from users, both internally and externally.
-In addition, we frequently receive pull requests from external users (for example, [PR #9917](https://github.com/google/jax/pull/9917), [PR #10322](https://github.com/google/jax/pull/10322)) seeking to improve JAX's type annotations: it's not always clear to the JAX team member reviewing the code whether such contributions are beneficial, particularly when they introduce complex Protocols to address the challenges inherent to full-fledged annotation of JAX's use of Python.
+In addition, we frequently receive pull requests from external users (for example, [PR #9917](https://github.com/jax-ml/jax/pull/9917), [PR #10322](https://github.com/jax-ml/jax/pull/10322)) seeking to improve JAX's type annotations: it's not always clear to the JAX team member reviewing the code whether such contributions are beneficial, particularly when they introduce complex Protocols to address the challenges inherent to full-fledged annotation of JAX's use of Python.
 This document details JAX's goals and recommendations for type annotations within the package.
 
 ## Why type annotations?
@@ -21,7 +21,7 @@ There are a number of reasons that a Python project might wish to annotate their
 
 ### Level 1: Annotations as documentation
 
-When originally introduced in [PEP 3107](https://peps.python.org/pep-3107/), type annotations were motivated partly by the ability to use them as concise, inline documentation of function parameter types and return types. JAX has long utilized annotations in this manner; an example is the common pattern of creating type names aliased to `Any`. An example can be found in `lax/slicing.py` [[source](https://github.com/google/jax/blob/2bc3e39cd9104071ee39dacac22abd51b94eb27e/jax/_src/lax/slicing.py#L47-L58)]:
+When originally introduced in [PEP 3107](https://peps.python.org/pep-3107/), type annotations were motivated partly by the ability to use them as concise, inline documentation of function parameter types and return types. JAX has long utilized annotations in this manner; an example is the common pattern of creating type names aliased to `Any`. An example can be found in `lax/slicing.py` [[source](https://github.com/jax-ml/jax/blob/2bc3e39cd9104071ee39dacac22abd51b94eb27e/jax/_src/lax/slicing.py#L47-L58)]:
 
 ```python
 Array = Any
@@ -44,14 +44,14 @@ Many modern IDEs take advantage of type annotations as inputs to [intelligent co
 
 This use of type checking requires going further than the simple aliases used above; for example, knowing that the `slice` function returns an alias of `Any` named `Array` does not add any useful information to the code completion engine. However, were we to annotate the function with a `DeviceArray` return type, the autocomplete would know how to populate the namespace of the result, and thus be able to suggest more relevant autocompletions during the course of development.
 
-JAX has begun to add this level of type annotation in a few places; one example is the `jnp.ndarray` return type within the `jax.random` package [[source](https://github.com/google/jax/blob/2bc3e39cd9104071ee39dacac22abd51b94eb27e/jax/_src/random.py#L359)]:
+JAX has begun to add this level of type annotation in a few places; one example is the `jnp.ndarray` return type within the `jax.random` package [[source](https://github.com/jax-ml/jax/blob/2bc3e39cd9104071ee39dacac22abd51b94eb27e/jax/_src/random.py#L359)]:
 
 ```python
 def shuffle(key: KeyArray, x: Array, axis: int = 0) -> jnp.ndarray:
   ...
 ```
 
-In this case `jnp.ndarray` is an abstract base class that forward-declares the attributes and methods of JAX arrays ([see source](https://github.com/google/jax/blob/2bc3e39cd9104071ee39dacac22abd51b94eb27e/jax/_src/numpy/ndarray.py#L41)), and so Pylance in VSCode can offer the full set of autocompletions on results from this function. Here is a screenshot showing the result:
+In this case `jnp.ndarray` is an abstract base class that forward-declares the attributes and methods of JAX arrays ([see source](https://github.com/jax-ml/jax/blob/2bc3e39cd9104071ee39dacac22abd51b94eb27e/jax/_src/numpy/ndarray.py#L41)), and so Pylance in VSCode can offer the full set of autocompletions on results from this function. Here is a screenshot showing the result:
 
 ![VSCode Intellisense Screenshot](../_static/vscode-completion.png)
 
@@ -166,7 +166,7 @@ Inputs to JAX functions and methods should be typed as permissively as is reason
 
 - `ArrayLike` would be a union of anything that can be implicitly converted into an array: for example, jax arrays, numpy arrays, JAX tracers, and python or numpy scalars
 - `DTypeLike` would be a union of anything that can be implicitly converted into a dtype: for example, numpy dtypes, numpy dtype objects, jax dtype objects, strings, and built-in types.
-- `ShapeLike` would be a union of anything that could be converted into a shape: for example, sequences of integer or integer-like objecs.
+- `ShapeLike` would be a union of anything that could be converted into a shape: for example, sequences of integer or integer-like objects.
 - etc.
   
 Note that these will in general be simpler than the equivalent protocols used in {mod}`numpy.typing`. For example, in the case of `DTypeLike`, JAX does not support structured dtypes, so JAX can use a simpler implementation. Similarly, in `ArrayLike`, JAX generally does not support list or tuple inputs in place of arrays, so the type definition will be simpler than the NumPy analog.
@@ -177,8 +177,8 @@ Conversely, outputs of functions and methods should be typed as strictly as poss
 
 - `Array` or `NDArray` (see below) for type annotation purposes is effectively equivalent to `Union[Tracer, jnp.ndarray]` and should be used to annotate array outputs.
 - `DType` is an alias of `np.dtype`, perhaps with the ability to also represent key types and other generalizations used within JAX.
-- `Shape` is essentially `Tuple[int, ...]`, perhaps with some additional flexibilty to account for dynamic shapes.
-- `NamedShape` is an extension of `Shape` that allows for named shapes as used internall in JAX.
+- `Shape` is essentially `Tuple[int, ...]`, perhaps with some additional flexibility to account for dynamic shapes.
+- `NamedShape` is an extension of `Shape` that allows for named shapes as used internally in JAX.
 - etc.
 
 We will also explore whether the current implementation of `jax.numpy.ndarray` can be dropped in favor of making `ndarray` an alias of `Array` or similar.
@@ -232,7 +232,7 @@ assert jit(f)(x)  # x will be a tracer
 ```
 Again, there are a couple mechanisms that could be used for this:
 
-- override `type(ArrayInstance).__instancecheck__` to return `True` for both `Array` and `Tracer` objects; this is how `jnp.ndarray` is currently implemented ([source](https://github.com/google/jax/blob/jax-v0.3.17/jax/_src/numpy/ndarray.py#L24-L49)).
+- override `type(ArrayInstance).__instancecheck__` to return `True` for both `Array` and `Tracer` objects; this is how `jnp.ndarray` is currently implemented ([source](https://github.com/jax-ml/jax/blob/jax-v0.3.17/jax/_src/numpy/ndarray.py#L24-L49)).
 - define `ArrayInstance` as an abstract base class and dynamically register it to `Array` and `Tracer`
 - restructure `Array` and `Tracer` so that `ArrayInstance` is a true base class of both `Array` and `Tracer`
 
@@ -283,7 +283,7 @@ Finally, we could opt for full unification via restructuring of the class hierar
 Here `jnp.ndarray` could be an alias for `jax.Array`.
 This final approach is in some senses the most pure, but it is somewhat forced from an OOP design standpoint (`Tracer` *is an* `Array`?).
 
-##### Option 4: Parial unification via class hierarchy
+##### Option 4: Partial unification via class hierarchy
 We could make the class hierarchy more sensible by making `Tracer` and the class for
 on-device arrays inherit from a common base class. So, for example:
 

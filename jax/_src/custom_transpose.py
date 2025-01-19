@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
-from typing import Any, Callable, Optional, Tuple
+from __future__ import annotations
 
-from jax.interpreters import mlir
-from jax.interpreters import partial_eval as pe
-from jax.interpreters import xla
-from jax.tree_util import (tree_flatten, tree_leaves, tree_map,
-                           tree_structure, treedef_tuple, tree_unflatten)
+from collections.abc import Callable
+import functools
+from typing import Any
+
 from jax._src import ad_util
 from jax._src import api_util
 from jax._src import core
@@ -29,6 +27,11 @@ from jax._src import source_info_util
 from jax._src import traceback_util
 from jax._src import util
 from jax._src.interpreters import ad
+from jax._src.interpreters import mlir
+from jax._src.interpreters import partial_eval as pe
+from jax._src.interpreters import xla
+from jax._src.tree_util import (tree_flatten, tree_leaves, tree_map,
+                                tree_structure, treedef_tuple, tree_unflatten)
 
 
 source_info_util.register_exclusion(__file__)
@@ -51,13 +54,13 @@ class StoreEqual(lu.Store):
 
 @util.curry
 def transformation_with_aux(
-    gen, fun: lu.WrappedFun, *gen_static_args) -> Tuple[lu.WrappedFun, Any]:
+    gen, fun: lu.WrappedFun, *gen_static_args) -> tuple[lu.WrappedFun, Any]:
   out_store = StoreEqual()
   out_thunk = lambda: out_store.val
   return fun.wrap(gen, gen_static_args, out_store), out_thunk
 
 flatten_fun_nokwargs = transformation_with_aux(
-    api_util.flatten_fun_nokwargs.args[0])  # type: ignore[has-type]
+    api_util.flatten_fun_nokwargs.args[0])
 
 
 ### api
@@ -65,11 +68,11 @@ flatten_fun_nokwargs = transformation_with_aux(
 @custom_api_util.register_custom_decorator_type
 class custom_transpose:
   fun: Callable
-  transpose: Optional[Callable] = None
+  transpose: Callable | None = None
 
   def __init__(self, fun: Callable):
     functools.update_wrapper(self, fun)
-    self.fun = fun  # type: ignore[assignment]
+    self.fun = fun
 
   __getattr__ = custom_api_util.forward_attr
 
@@ -152,18 +155,9 @@ class CustomTransposePrimitive(core.Primitive):
   map_primitive = False
   multiple_results = True
 
-  def bind(self, call, *args, **params):
-    # TODO(frostig,mattjj): This doesn't handle closures yet, which is
-    # a bit involved. Closures are complicated by us binding `call`
-    # twice in the JVP rule for custom transpose. The `env_trace_todo`
-    # output by `process_env_traces` due to one of those two bindings
-    # should be passable to the other, and need to be passed onward
-    # since the second bind is deferred by partial eval (since it
-    # typically receives unknowns)
-    top_trace = core.find_top_trace(args)
-    tracers = map(top_trace.full_raise, args)
-    outs = top_trace.process_custom_transpose(self, call, tracers, **params)
-    return outs
+  def bind_with_trace(self, trace, call_args, params):
+    call, tracers = call_args[0], call_args[1:]
+    return trace.process_custom_transpose(self, call, tracers, **params)
 
   # TODO(frostig,mattjj): consider keeping `call` as a named parameter
   # instead of following this "call primitive" convention.
@@ -179,7 +173,7 @@ class CustomTransposePrimitive(core.Primitive):
 
 
 # TODO(frostig,mattjj): reinstate checks
-def custom_transpose_typecheck(*in_atoms, out_types, **params):
+def custom_transpose_typecheck(_, *in_atoms, out_types, **params):
   del in_atoms, params
   return out_types, core.no_effects
 

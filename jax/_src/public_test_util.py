@@ -15,13 +15,11 @@
 from functools import partial
 import operator
 
-from jax import config
-from jax.tree_util import tree_map, tree_reduce
 from jax._src import api
+from jax._src import config
 from jax._src import dtypes as _dtypes
-from jax._src import xla_bridge
-from jax._src.config import flags
-from jax._src.lib import xla_client
+from jax._src.tree_util import tree_map, tree_reduce
+
 import numpy as np
 
 
@@ -31,10 +29,7 @@ import numpy as np
 __all__ = ['check_grads', 'check_jvp', 'check_vjp']
 
 
-FLAGS = flags.FLAGS
-
 EPS = 1e-4
-_fp8_enabled = xla_client._version >= 117
 
 
 def _dtype(x):
@@ -47,40 +42,46 @@ def _dtype(x):
 
 
 _default_tolerance = {
-  _dtypes.float0: 0,
-  np.dtype(np.bool_): 0,
-  np.dtype(np.int8): 0,
-  np.dtype(np.int16): 0,
-  np.dtype(np.int32): 0,
-  np.dtype(np.int64): 0,
-  np.dtype(np.uint8): 0,
-  np.dtype(np.uint16): 0,
-  np.dtype(np.uint32): 0,
-  np.dtype(np.uint64): 0,
-  np.dtype(_dtypes.bfloat16): 1e-2,
-  np.dtype(np.float16): 1e-3,
-  np.dtype(np.float32): 1e-6,
-  np.dtype(np.float64): 1e-15,
-  np.dtype(np.complex64): 1e-6,
-  np.dtype(np.complex128): 1e-15,
-}
-if _fp8_enabled:
-  _default_tolerance.update({
+    _dtypes.float0: 0,
+    np.dtype(np.bool_): 0,
+    np.dtype(_dtypes.int4): 0,
+    np.dtype(np.int8): 0,
+    np.dtype(np.int16): 0,
+    np.dtype(np.int32): 0,
+    np.dtype(np.int64): 0,
+    np.dtype(_dtypes.uint4): 0,
+    np.dtype(np.uint8): 0,
+    np.dtype(np.uint16): 0,
+    np.dtype(np.uint32): 0,
+    np.dtype(np.uint64): 0,
+    np.dtype(_dtypes.float8_e4m3b11fnuz): 1e-1,
     np.dtype(_dtypes.float8_e4m3fn): 1e-1,
+    np.dtype(_dtypes.float8_e4m3fnuz): 1e-1,
     np.dtype(_dtypes.float8_e5m2): 1e-1,
-  })
+    np.dtype(_dtypes.float8_e5m2fnuz): 1e-1,
+    np.dtype(_dtypes.bfloat16): 1e-2,
+    np.dtype(np.float16): 1e-3,
+    np.dtype(np.float32): 1e-6,
+    np.dtype(np.float64): 1e-15,
+    np.dtype(np.complex64): 1e-6,
+    np.dtype(np.complex128): 1e-15,
+}
 
+if _dtypes.int2 is not None:
+  assert _dtypes.uint2 is not None
+  _default_tolerance[np.dtype(_dtypes.int2)] = 0
+  _default_tolerance[np.dtype(_dtypes.uint2)] = 0
 
 def default_tolerance():
-  if device_under_test() != "tpu":
-    return _default_tolerance
-  tol = _default_tolerance.copy()
-  tol[np.dtype(np.float32)] = 1e-3
-  tol[np.dtype(np.complex64)] = 1e-3
-  return tol
+  return _default_tolerance
 
 
 default_gradient_tolerance = {
+  np.dtype(_dtypes.float8_e4m3b11fnuz): 1e-1,
+  np.dtype(_dtypes.float8_e4m3fn): 1e-1,
+  np.dtype(_dtypes.float8_e4m3fnuz): 1e-1,
+  np.dtype(_dtypes.float8_e5m2): 1e-1,
+  np.dtype(_dtypes.float8_e5m2fnuz): 1e-1,
   np.dtype(_dtypes.bfloat16): 1e-1,
   np.dtype(np.float16): 1e-2,
   np.dtype(np.float32): 2e-3,
@@ -88,11 +89,14 @@ default_gradient_tolerance = {
   np.dtype(np.complex64): 1e-3,
   np.dtype(np.complex128): 1e-5,
 }
-if _fp8_enabled:
-  default_gradient_tolerance.update({
-    np.dtype(_dtypes.float8_e4m3fn): 1e-1,
-    np.dtype(_dtypes.float8_e5m2): 1e-1,
-  })
+
+# TODO: make this unconditional when ml_dtypes>=0.5.0 is required
+if _dtypes.float8_e3m4 is not None:
+  _default_tolerance[np.dtype(_dtypes.float8_e3m4)] = 1e-1
+  default_gradient_tolerance[np.dtype(_dtypes.float8_e3m4)] = 1e-1
+if _dtypes.float8_e4m3 is not None:
+  _default_tolerance[np.dtype(_dtypes.float8_e4m3)] = 1e-1
+  default_gradient_tolerance[np.dtype(_dtypes.float8_e4m3)] = 1e-1
 
 def is_python_scalar(val):
   return not isinstance(val, np.generic) and isinstance(val, (bool, int, float, complex))
@@ -101,12 +105,34 @@ def _assert_numpy_allclose(a, b, atol=None, rtol=None, err_msg=''):
   if a.dtype == b.dtype == _dtypes.float0:
     np.testing.assert_array_equal(a, b, err_msg=err_msg)
     return
-  if _fp8_enabled:
-    custom_dtypes = [_dtypes.float8_e4m3fn, _dtypes.float8_e5m2, _dtypes.bfloat16]
-  else:
-    custom_dtypes = [_dtypes.bfloat16]
-  a = a.astype(np.float32) if a.dtype in custom_dtypes else a
-  b = b.astype(np.float32) if b.dtype in custom_dtypes else b
+
+  custom_float_dtypes = [
+    _dtypes.float8_e4m3b11fnuz,
+    _dtypes.float8_e4m3fn,
+    _dtypes.float8_e4m3fnuz,
+    _dtypes.float8_e5m2,
+    _dtypes.float8_e5m2fnuz,
+    _dtypes.bfloat16,
+  ]
+
+  if _dtypes.float8_e4m3 is not None:
+    custom_float_dtypes.insert(0, _dtypes.float8_e4m3)
+  if _dtypes.float8_e3m4 is not None:
+    custom_float_dtypes.insert(0, _dtypes.float8_e3m4)
+
+  def maybe_upcast(x):
+    if x.dtype in custom_float_dtypes:
+      return x.astype(np.float32)
+    # TODO(reedwm): Upcasting int2/int4 to int8 will no longer be necessary once
+    # JAX depends on a version of ml_dtypes which contains
+    # https://github.com/jax-ml/ml_dtypes/commit/348fd3704306cae97f617c38045cee6bc416bf10.
+    if x.dtype in _dtypes._intn_dtypes:
+      return x.astype(np.int8 if _dtypes.iinfo(x.dtype).min < 0 else np.uint8)
+    return x
+
+  a = maybe_upcast(a)
+  b = maybe_upcast(b)
+
   kw = {}
   if atol: kw["atol"] = atol
   if rtol: kw["rtol"] = rtol
@@ -141,7 +167,7 @@ def check_close(xs, ys, atol=None, rtol=None, err_msg=''):
 
 def _check_dtypes_match(xs, ys):
   def _assert_dtypes_match(x, y):
-    if config.x64_enabled:
+    if config.enable_x64.value:
       assert _dtype(x) == _dtype(y)
     else:
       assert (_dtypes.canonicalize_dtype(_dtype(x)) ==
@@ -296,7 +322,3 @@ def check_grads(f, args, order,
         _check_grads(f_vjp, args, order - 1, rev_msg)
 
   _check_grads(f, args, order)
-
-
-def device_under_test():
-  return getattr(FLAGS, 'jax_test_dut', None) or xla_bridge.get_backend().platform

@@ -15,7 +15,7 @@
 """Sparse utilities."""
 
 import functools
-from typing import Any, NamedTuple, Tuple, Union
+from typing import NamedTuple
 
 import numpy as np
 import jax
@@ -23,8 +23,6 @@ from jax import lax
 from jax import tree_util
 from jax import vmap
 from jax._src import core
-from jax._src import dtypes
-from jax._src import stages
 from jax._src.api_util import flatten_axes
 import jax.numpy as jnp
 from jax.util import safe_zip
@@ -40,7 +38,7 @@ class SparseEfficiencyWarning(UserWarning):
 class CuSparseEfficiencyWarning(SparseEfficiencyWarning):
   pass
 
-Shape = Tuple[int, ...]
+Shape = tuple[int, ...]
 
 class SparseInfo(NamedTuple):
   shape: Shape
@@ -49,7 +47,7 @@ class SparseInfo(NamedTuple):
 
 #--------------------------------------------------------------------
 # utilities
-# TODO: possibly make these primitives, targeting cusparse rountines
+# TODO: possibly make these primitives, targeting cusparse routines
 #       csr2coo/coo2csr/SPDDMM
 
 def nfold_vmap(fun, N, *, broadcasted=True, in_axes=0):
@@ -79,7 +77,7 @@ def broadcasting_vmap(fun, in_axes=0, out_axes=0):
   return batched_fun
 
 @jax.jit
-def _csr_to_coo(indices: Array, indptr: Array) -> Tuple[Array, Array]:
+def _csr_to_coo(indices: Array, indptr: Array) -> tuple[Array, Array]:
   """Given CSR (indices, indptr) return COO (row, col)"""
   return jnp.cumsum(jnp.zeros_like(indices).at[indptr].add(1)) - 1, indices
 
@@ -101,16 +99,16 @@ def _count_stored_elements_per_batch(mat: Array, n_batch: int = 0, n_dense: int 
   mask = mask.sum(tuple(range(n_batch, mask.ndim)))
   return mask
 
-def _count_stored_elements(mat: Array, n_batch: int = 0, n_dense: int = 0) -> int:
+def _count_stored_elements(mat: Array, n_batch: int = 0, n_dense: int = 0) -> Array:
   """Return the number of stored elements (nse) of the given dense matrix."""
-  return int(_count_stored_elements_per_batch(mat, n_batch, n_dense).max(initial=0))
+  return _count_stored_elements_per_batch(mat, n_batch, n_dense).max(initial=0)
 
 def _dot_general_validated_shape(
-    lhs_shape: Tuple[int, ...], rhs_shape: Tuple[int, ...],
-    dimension_numbers: DotDimensionNumbers) -> Tuple[int, ...]:
+    lhs_shape: tuple[int, ...], rhs_shape: tuple[int, ...],
+    dimension_numbers: DotDimensionNumbers) -> tuple[int, ...]:
   """Validate the inputs and return the output shape."""
   lhs = core.ShapedArray(lhs_shape, np.float32)
   rhs = core.ShapedArray(rhs_shape, np.float32)
   return _dot_general_shape_rule(
     lhs, rhs, dimension_numbers=dimension_numbers,
-    precision=None, preferred_element_type=None)
+    precision=None, preferred_element_type=None, out_sharding=None)

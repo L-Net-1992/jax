@@ -7,7 +7,7 @@ Python wheel, and `jaxlib`, which is a mostly-C++ wheel that contains libraries
 such as:
 * XLA,
 * pieces of LLVM used by XLA,
-* MLIR infrastructure, such as the MHLO Python bindings.
+* MLIR infrastructure, such as the StableHLO Python bindings.
 * JAX-specific C++ libraries for fast JIT and PyTree manipulation.
 
 We distribute separate `jax` and `jaxlib` packages because it makes it easy to
@@ -58,11 +58,11 @@ These constraints imply the following rules for releases:
 * If a new `jaxlib` is released, a `jax` release must be made at the same time.
 
 These
-[version constraints](https://github.com/google/jax/blob/main/jax/version.py)
+[version constraints](https://github.com/jax-ml/jax/blob/main/jax/version.py)
 are currently checked by `jax` at import time, instead of being expressed as
 Python package version constraints. `jax` checks the `jaxlib` version at
 runtime rather than using a `pip` package version constraint because we
-[provide separate `jaxlib` wheels](https://github.com/google/jax#installation)
+[provide separate `jaxlib` wheels](https://github.com/jax-ml/jax#installation)
 for a variety of hardware and software versions (e.g, GPU, TPU, etc.). Since we
 do not know which is the right choice for any given user, we do not want `pip`
 to install a `jaxlib` package for us automatically.
@@ -119,9 +119,9 @@ no released `jax` version uses that API.
 ## How is the source to `jaxlib` laid out?
 
 `jaxlib` is split across two main repositories, namely the
-[`jaxlib/` subdirectory in the main JAX repository](https://github.com/google/jax/tree/main/jaxlib)
+[`jaxlib/` subdirectory in the main JAX repository](https://github.com/jax-ml/jax/tree/main/jaxlib)
 and in the
-[XLA source tree, which lives inside the TensorFlow repository](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/compiler/xla).
+[XLA source tree, which lives inside the XLA repository](https://github.com/openxla/xla).
 The JAX-specific pieces inside XLA are primarily in the
 [`xla/python` subdirectory](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/compiler/xla/python).
 
@@ -146,7 +146,7 @@ level.
 
 `jaxlib` is built using Bazel out of the `jax` repository. The pieces of
 `jaxlib` from the XLA repository are incorporated into the build
-[as a Bazel submodule](https://github.com/google/jax/blob/main/WORKSPACE).
+[as a Bazel submodule](https://github.com/jax-ml/jax/blob/main/WORKSPACE).
 To update the version of XLA used during the build, one must update the pinned
 version in the Bazel `WORKSPACE`. This is done manually on an
 as-needed basis, but can be overridden on a build-by-build basis.
@@ -164,7 +164,7 @@ compatibility, we have additional versioning that is independent of the `jaxlib`
 release version numbers.
 
 We maintain an additional version number (`_version`) in
-[`xla_client.py` in the XLA repository](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/compiler/xla/python/xla_client.py).
+[`xla_client.py` in the XLA repository](https://github.com/openxla/xla/blob/main/xla/python/xla_client.py).
 The idea is that this version number, is defined in `xla/python`
 together with the C++ parts of JAX, is also accessible to JAX Python as
 `jax._src.lib.xla_extension_version`, and must

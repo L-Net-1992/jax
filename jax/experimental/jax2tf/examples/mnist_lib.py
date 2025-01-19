@@ -18,27 +18,31 @@ moving parts, at the expense of code size), and another using Flax.
 
 See README.md for how these are used.
 """
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
 import functools
 import logging
 import re
 import time
-from typing import Any, Callable, Optional, Sequence, Tuple
+from typing import Any
+import warnings
 from absl import flags
 
-import flax  # type: ignore[import]
 from flax import linen as nn
 
 import jax
 import jax.numpy as jnp
 
-from matplotlib import pyplot as plt  # type: ignore
+from matplotlib import pyplot as plt
 import numpy as np
 import optax
-import tensorflow as tf  # type: ignore
+import tensorflow as tf
 import tensorflow_datasets as tfds  # type: ignore
 
-flags.DEFINE_boolean("mock_data", False, "Use fake data, for testing.")
-FLAGS = flags.FLAGS
+_MOCK_DATA = flags.DEFINE_boolean("mock_data", False,
+                                  "Use fake data, for testing.")
 
 #### Model parameters
 
@@ -63,10 +67,12 @@ def load_mnist(split: tfds.Split, batch_size: int):
     an iterator with pairs (images, labels). The images have shape
     (B, 28, 28, 1) and the labels have shape (B, 10), where B is the batch_size.
   """
-  if FLAGS.mock_data:
+  if _MOCK_DATA.value:
     with tfds.testing.mock_data(num_examples=batch_size):
       try:
-        ds = tfds.load("mnist", split=split)
+        with warnings.catch_warnings():
+          warnings.simplefilter("ignore")
+          ds = tfds.load("mnist", split=split)
       except Exception as e:
         m = re.search(r'metadata files were not found in (.+/)mnist/', str(e))
         if m:
@@ -102,7 +108,7 @@ class PureJaxMNIST:
   name = "mnist_pure_jax"
 
   @staticmethod
-  def predict(params: Sequence[Tuple[Any, Any]], inputs, with_classifier=True):
+  def predict(params: Sequence[tuple[Any, Any]], inputs, with_classifier=True):
     """The prediction function.
 
     Args:
@@ -124,7 +130,7 @@ class PureJaxMNIST:
     final_w, final_b = params[-1]
     logits = jnp.dot(x, final_w) + final_b
     return logits - jax.scipy.special.logsumexp(
-      logits, axis=1, keepdims=True)  # type: ignore[attr-defined]
+      logits, axis=1, keepdims=True)
 
   @staticmethod
   def loss(params, inputs, labels):
@@ -287,7 +293,7 @@ def plot_images(ds,
                 nr_rows: int,
                 nr_cols: int,
                 title: str,
-                inference_fn: Optional[Callable] = None):
+                inference_fn: Callable | None = None):
   """Plots a grid of images with their predictions.
 
   Params:

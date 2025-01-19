@@ -27,9 +27,9 @@ For example:
 >>> from jax import random
 >>> from jax.experimental.sparse import BCOO, sparsify
 
->>> mat = random.uniform(random.PRNGKey(1701), (5, 5))
+>>> mat = random.uniform(random.key(1701), (5, 5))
 >>> mat = mat.at[mat < 0.5].set(0)
->>> vec = random.uniform(random.PRNGKey(42), (5,))
+>>> vec = random.uniform(random.key(42), (5,))
 
 >>> def f(mat, vec):
 ...   return -(jnp.sin(mat) @ vec)
@@ -47,35 +47,37 @@ Array([-1.2655463 , -0.52060574, -0.14522289, -0.10817424,
        -0.15574613], dtype=float32)
 """
 
+from collections.abc import Callable, Sequence
 import functools
-from typing import (
-  Any, Callable, Dict, NamedTuple, List, Optional, Sequence, Tuple)
+from typing import Any, NamedTuple
 
 import numpy as np
 
 import jax
 from jax import lax
+from jax._src import config
 from jax._src import core
+from jax._src.custom_derivatives import lift_jvp
 from jax._src import linear_util as lu
 from jax._src import pjit
+from jax._src import sharding_impls
 from jax.experimental.sparse.bcoo import bcoo_multiply_dense, bcoo_multiply_sparse
 import jax.numpy as jnp
 from jax._src.api_util import flatten_fun_nokwargs
-from jax.interpreters import partial_eval as pe
-from jax.interpreters import xla
-from jax.interpreters import pxla
+from jax._src.lib import pytree
+from jax._src.interpreters import partial_eval as pe
 from jax.tree_util import tree_flatten, tree_map, tree_unflatten
 from jax.util import safe_map, safe_zip, split_list
-from jax._src.config import config
 from jax._src.lax.control_flow import _check_tree_and_avals
 from jax._src.numpy import lax_numpy
 from jax.experimental import sparse
 from jax.experimental.sparse import BCOO, BCSR
 
-sparse_rules_bcoo : Dict[core.Primitive, Callable] = {}
-sparse_rules_bcsr : Dict[core.Primitive, Callable] = {}
+sparse_rules_bcoo : dict[core.Primitive, Callable] = {}
+sparse_rules_bcsr : dict[core.Primitive, Callable] = {}
 
 _zero_preserving_linear_unary_primitives = [
+  lax.conj_p,
   lax.copy_p,
   lax.imag_p,
   lax.neg_p,
@@ -95,12 +97,13 @@ _zero_preserving_unary_primitives = [
   lax.sin_p,
   lax.sinh_p,
   lax.sqrt_p,
+  lax.square_p,
   lax.tan_p,
   lax.tanh_p,
   lax.convert_element_type_p,
 ]
 
-_densifying_primitives : List[core.Primitive] = [
+_densifying_primitives : list[core.Primitive] = [
   lax.acos_p,
   lax.acosh_p,
   lax.bessel_i0e_p,
@@ -136,13 +139,13 @@ class SparsifyEnv:
   that may be shared between one or more SparsifyValue objects, which
   represent sparse or dense arrays via indices into the list of buffers.
   """
-  _buffers : List[Array]
+  _buffers : list[Array]
 
   def __init__(self, bufs=()):
     self._buffers = list(bufs)
 
   def _push(self, arr: Array) -> int:
-    self._buffers.append(jnp.asarray(arr))  # type: ignore
+    self._buffers.append(jnp.asarray(arr))
     return len(self._buffers) - 1
 
   def data(self, spvalue: SparsifyValue) -> Array:
@@ -194,12 +197,12 @@ class SparsifyEnv:
 
 
 class SparsifyValue(NamedTuple):
-  shape: Tuple[int, ...]
-  data_ref: Optional[int]
-  indices_ref: Optional[int] = None
-  indptr_ref: Optional[int] = None
-  indices_sorted: Optional[bool] = False
-  unique_indices: Optional[bool] = False
+  shape: tuple[int, ...]
+  data_ref: int | None
+  indices_ref: int | None = None
+  indptr_ref: int | None = None
+  indices_sorted: bool | None = False
+  unique_indices: bool | None = False
 
   @property
   def ndim(self):
@@ -271,18 +274,8 @@ def spvalues_to_avals(
   return tree_map(spvalue_to_aval, spvalues, is_leaf=_is_spvalue)
 
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Implementation of sparsify() using tracers.
-
-def popattr(obj: Any, name: str) -> Any:
-  assert hasattr(obj, name)
-  val = getattr(obj, name)
-  delattr(obj, name)
-  return val
-
-def setnewattr(obj: Any, name: str, val: Any):
-  assert not hasattr(obj, name)
-  setattr(obj, name, val)
 
 class SparseTracer(core.Tracer):
   def __init__(self, trace: core.Trace, *, spvalue):
@@ -291,9 +284,9 @@ class SparseTracer(core.Tracer):
 
   @property
   def spenv(self):
-    if not hasattr(self._trace.main, 'spenv'):
-      raise RuntimeError("Internal: main does not have spenv defined.")
-    return self._trace.main.spenv
+    if not hasattr(self._trace, 'spenv'):
+      raise RuntimeError("Internal: trace does not have spenv defined.")
+    return self._trace.spenv
 
   @property
   def aval(self):
@@ -303,66 +296,71 @@ class SparseTracer(core.Tracer):
     return self
 
 class SparseTrace(core.Trace):
-  def pure(self, val: Any):
-    if not hasattr(self.main, 'spenv'):
-      raise RuntimeError("Internal: main does not have spenv defined.")
-    spvalue, = arrays_to_spvalues(self.main.spenv, [val])
-    return SparseTracer(self, spvalue=spvalue)
 
-  def lift(self, val: core.Tracer):
-    if not hasattr(self.main, 'spenv'):
-      raise RuntimeError("Internal: main does not have spenv defined.")
-    spvalue, = arrays_to_spvalues(self.main.spenv, [val])
-    return SparseTracer(self, spvalue=spvalue)
+  def __init__(self, parent_trace, tag, spenv):
+    self.parent_trace = parent_trace
+    self.tag = tag
+    self.spenv = spenv
 
-  def sublift(self, val: SparseTracer):
-    return SparseTracer(val._trace, spvalue=val._spvalue)
+  def to_sparse_tracer(self, val):
+    if isinstance(val, SparseTracer) and self.tag is val._trace.tag:
+      return val
+    else:
+      with core.set_current_trace(self.parent_trace):
+        spvalue, = arrays_to_spvalues(self.spenv, [val])
+      return SparseTracer(self, spvalue=spvalue)
 
   def process_primitive(self, primitive, tracers, params):
-    spenv = popattr(self.main, 'spenv')
+    tracers = [self.to_sparse_tracer(t) for t in tracers]
     spvalues = [t._spvalue for t in tracers]
     if any(spvalue.is_sparse() for spvalue in spvalues):
       if primitive not in sparse_rules_bcoo:
         _raise_unimplemented_primitive(primitive)
-      out_spvalues = sparse_rules_bcoo[primitive](spenv, *(t._spvalue for t in tracers), **params)
+      with core.set_current_trace(self.parent_trace):
+        out_spvalues = sparse_rules_bcoo[primitive](self.spenv, *(t._spvalue for t in tracers), **params)
     else:
-      out_bufs = primitive.bind(*(spenv.data(spvalue) for spvalue in spvalues), **params)
-      out_spvalues = arrays_to_spvalues(spenv, out_bufs if primitive.multiple_results else [out_bufs])
-    setnewattr(self.main, 'spenv', spenv)
+      out_bufs = primitive.bind_with_trace(self.parent_trace, tuple(self.spenv.data(spvalue) for spvalue in spvalues), params)
+      out_spvalues = arrays_to_spvalues(self.spenv, out_bufs if primitive.multiple_results else [out_bufs])
     out_tracers = tuple(SparseTracer(self, spvalue=spvalue) for spvalue in out_spvalues)
     return out_tracers if primitive.multiple_results else out_tracers[0]
 
   def process_call(self, call_primitive, f: lu.WrappedFun, tracers, params):
-    spenv = popattr(self.main, 'spenv')
+    assert False
     spvalues = tuple(t._spvalue for t in tracers)
-    in_bufs = spenv._buffers
+    in_bufs = self.spenv._buffers
     fun, out_spvalues = sparsify_subtrace(f, self.main, spvalues)
     if any(params['donated_invars']):
       raise NotImplementedError("sparsify does not support donated_invars")
     params = dict(params, donated_invars=tuple(False for buf in in_bufs))
     bufs_out = call_primitive.bind(fun, *in_bufs, **params)
-    setnewattr(self.main, 'spenv', SparsifyEnv(bufs_out))
     return [SparseTracer(self, spvalue=spvalue) for spvalue in out_spvalues()]
 
-@lu.transformation_with_aux
-def sparsify_subtrace(main, spvalues, *bufs):
-  setnewattr(main, 'spenv', SparsifyEnv(bufs))
-  trace = main.with_cur_sublevel()
-  in_tracers = [SparseTracer(trace, spvalue=spvalue) for spvalue in spvalues]
-  outs = yield in_tracers, {}
-  out_traces = [trace.full_raise(out) for out in outs]
-  buffers = popattr(main, 'spenv')._buffers
-  yield buffers, [out._spvalue for out in out_traces]
+  def process_custom_jvp_call(self, primitive, fun, jvp, tracers, *, symbolic_zeros):
+    # TODO(jakevdp): handle the jvp here
+    del primitive, jvp, symbolic_zeros
+    with core.set_current_trace(self):
+      return fun.call_wrapped(*tracers)
 
-def sparsify_fun(wrapped_fun, args: List[ArrayOrSparse]):
-  with core.new_main(SparseTrace) as main:
-    spenv = SparsifyEnv()
-    spvalues = arrays_to_spvalues(spenv, args)
-    in_bufs = spenv._buffers
-    fun, out_spvalues = sparsify_subtrace(wrapped_fun, main, spvalues)
-    out_bufs = fun.call_wrapped(*in_bufs)
-    spenv = SparsifyEnv(out_bufs)
-    del main
+@lu.transformation_with_aux2
+def sparsify_subtrace(f, store, tag, spenv, spvalues, *bufs):
+  with core.take_current_trace() as parent:
+    trace = SparseTrace(parent, tag, spenv)
+    with core.set_current_trace(trace):
+      in_tracers = [SparseTracer(trace, spvalue=spvalue) for spvalue in spvalues]
+      outs = f(*in_tracers)
+      out_traces = [trace.to_sparse_tracer(out) for out in outs]
+      buffers = spenv._buffers
+  store.store([out._spvalue for out in out_traces])
+  return buffers
+
+def sparsify_fun(wrapped_fun, args: list[ArrayOrSparse]):
+  tag = core.TraceTag()
+  spenv = SparsifyEnv()
+  spvalues = arrays_to_spvalues(spenv, args)
+  in_bufs = spenv._buffers
+  fun, out_spvalues = sparsify_subtrace(wrapped_fun, tag, spenv, spvalues)
+  out_bufs = fun.call_wrapped(*in_bufs)
+  spenv = SparsifyEnv(out_bufs)
   return spvalues_to_arrays(spenv, out_spvalues())
 
 def _sparsify_with_tracer(fun):
@@ -375,7 +373,7 @@ def _sparsify_with_tracer(fun):
     return tree_unflatten(out_tree(), out)
   return _wrapped
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Implementation of sparsify() using a jaxpr interpreter.
 
 def eval_sparse(
@@ -384,7 +382,7 @@ def eval_sparse(
     spvalues: Sequence[SparsifyValue],  # mix of sparse and dense pointers into spenv
     spenv: SparsifyEnv,
 ) -> Sequence[SparsifyValue]:
-  env : Dict[core.Var, SparsifyValue] = {}
+  env : dict[core.Var, SparsifyValue] = {}
 
   def read(var: core.Atom) -> SparsifyValue:
     # all literals are dense
@@ -420,14 +418,7 @@ def eval_sparse(
         _raise_unimplemented_primitive(prim)
       out = sparse_rules_bcoo[prim](spenv, *invals, **eqn.params)
     else:
-      if prim is xla.xla_call_p:
-        # TODO(vanderplas,frostig): workaround for binding call primitives
-        # within a jaxpr interpreter
-        params = eqn.params.copy()
-        fun = lu.wrap_init(core.jaxpr_as_fun(pe.ClosedJaxpr(params.pop('call_jaxpr'), ())))
-        out_bufs = prim.bind(fun, *(spenv.data(val) for val in invals), **params)
-      else:
-        out_bufs = prim.bind(*(spenv.data(val) for val in invals), **eqn.params)
+      out_bufs = prim.bind(*(spenv.data(val) for val in invals), **eqn.params)
       out_bufs = out_bufs if prim.multiple_results else [out_bufs]
       out = []
       for buf, outvar in safe_zip(out_bufs, eqn.outvars):
@@ -440,16 +431,20 @@ def eval_sparse(
   return safe_map(read, jaxpr.outvars)
 
 def sparsify_raw(f):
-  def wrapped(spenv: SparsifyEnv, *spvalues: SparsifyValue, **params: Any) -> Tuple[Sequence[SparsifyValue], bool]:
+
+  def wrapped(
+      spenv: SparsifyEnv, *spvalues: SparsifyValue, **params: Any
+  ) -> tuple[Sequence[SparsifyValue], pytree.PyTreeDef]:
     spvalues_flat, in_tree = tree_flatten(spvalues, is_leaf=_is_spvalue)
     in_avals_flat = spvalues_to_avals(spenv, spvalues_flat)
     wrapped_fun, out_tree = flatten_fun_nokwargs(lu.wrap_init(f, params), in_tree)
-    jaxpr, out_avals_flat, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, in_avals_flat)
+    jaxpr, out_avals_flat, consts, () = pe.trace_to_jaxpr_dynamic(wrapped_fun, in_avals_flat)
     result = eval_sparse(jaxpr, consts, spvalues_flat, spenv)
     if len(out_avals_flat) != len(result):
       raise Exception("Internal: eval_sparse does not return expected number of arguments. "
                       "Got {result} for avals {out_avals_flat}")
     return result, out_tree()
+
   return wrapped
 
 def _sparsify_with_interpreter(f):
@@ -491,7 +486,7 @@ def sparsify(f, use_tracer=False):
     return _sparsify_with_interpreter(f)
 
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # Sparse rules for various primitives
 
 def _ensure_unique_indices(spenv, spvalue):
@@ -560,6 +555,16 @@ _BCSR_STANDARD_PRIMITIVES = {
 for prim, bcsr_impl in _BCSR_STANDARD_PRIMITIVES.items():
   sparse_rules_bcsr[prim] = _standard_sparse_rule(prim, bcsr_impl)
 
+def _integer_pow_sparse(spenv, *spvalues, y):
+  if y <= 0:
+    raise NotImplementedError(f"sparse rule for {lax.integer_pow_p} with non-positive exponent {y} is "
+                              "not implemented because it would result in dense output. If this is your "
+                              "intent, use sparse.todense() to convert your argument to a dense array.")
+  return _zero_preserving_unary_op(lax.integer_pow_p, False)(spenv, *spvalues, y=y)
+
+sparse_rules_bcoo[lax.integer_pow_p] = _integer_pow_sparse
+sparse_rules_bcsr[lax.integer_pow_p] = _integer_pow_sparse
+
 def _transpose_sparse(spenv, *spvalues, permutation):
   permutation = tuple(permutation)
   args = spvalues_to_arrays(spenv, spvalues)
@@ -595,12 +600,13 @@ sparse_rules_bcoo[lax.transpose_p] = _transpose_sparse
 
 def _add_sparse(spenv, *spvalues):
   X, Y = spvalues
+  out_shape = lax.broadcast_shapes(X.shape, Y.shape)
   if X.is_sparse() and Y.is_sparse():
     if X.shape != Y.shape:
       raise NotImplementedError("Addition between sparse matrices of different shapes.")
     if X.indices_ref == Y.indices_ref:
       out_data = lax.add(spenv.data(X), spenv.data(Y))
-      if config.jax_enable_checks:
+      if config.enable_checks.value:
         assert X.indices_sorted == Y.indices_sorted
         assert X.unique_indices == Y.unique_indices
       out_spvalue = spenv.sparse(X.shape, out_data, indices_ref=X.indices_ref,
@@ -613,7 +619,18 @@ def _add_sparse(spenv, *spvalues):
       out_data = lax.concatenate([spenv.data(X), spenv.data(Y)], dimension=spenv.indices(X).ndim - 2)
       out_spvalue = spenv.sparse(X.shape, out_data, out_indices)
   else:
-    raise NotImplementedError("Addition between sparse and dense array.")
+    if Y.is_sparse():
+      X, Y = Y, X
+    assert X.is_sparse() and Y.is_dense()
+    if Y.shape != out_shape:
+      raise NotImplementedError(
+        "Addition between a sparse array X and a dense array Y is not implemented when "
+        "the output shape is larger than Y.shape. This is to prevent silent densification "
+        "of a large sparse array. If this is your intent, you can explicitly cast the sparse "
+        "array to a dense matrix.")
+    X_promoted, Y_promoted = spvalues_to_arrays(spenv, (X, Y))
+    out = X_promoted.todense() + Y_promoted
+    out_spvalue = spenv.dense(out)
 
   return (out_spvalue,)
 
@@ -632,7 +649,7 @@ def _mul_sparse(spenv, *spvalues):
   X, Y = spvalues
   if X.is_sparse() and Y.is_sparse():
     if X.indices_ref == Y.indices_ref and X.unique_indices:
-      if config.jax_enable_checks:
+      if config.enable_checks.value:
         assert X.indices_sorted == Y.indices_sorted
         assert X.unique_indices == Y.unique_indices
       out_data = lax.mul(spenv.data(X), spenv.data(Y))
@@ -656,6 +673,22 @@ def _mul_sparse(spenv, *spvalues):
 
 sparse_rules_bcoo[lax.mul_p] = _mul_sparse
 
+def _div_sparse(spenv, *spvalues):
+  X, Y = spvalues
+  if Y.is_sparse():
+    raise NotImplementedError(
+      "Division by a sparse array is not implemented because it "
+      "would result in dense output. If this is your intent, use "
+      "sparse.todense() to convert your arguments to a dense array.")
+  X_promoted = spvalues_to_arrays(spenv, X)
+  out_data = bcoo_multiply_dense(X_promoted, 1. / spenv.data(Y))
+  out_spvalue = spenv.sparse(X.shape, out_data, indices_ref=X.indices_ref,
+                              indices_sorted=X.indices_sorted,
+                              unique_indices=X.unique_indices)
+  return (out_spvalue,)
+
+sparse_rules_bcoo[lax.div_p] = _div_sparse
+
 def _reduce_sum_sparse(spenv, *spvalues, axes):
   X, = spvalues
   X_promoted = spvalues_to_arrays(spenv, X)
@@ -668,7 +701,6 @@ def _reduce_sum_sparse(spenv, *spvalues, axes):
   return (out_spvalue,)
 
 sparse_rules_bcoo[lax.reduce_sum_p] = _reduce_sum_sparse
-
 
 
 def _gather_sparse_rule(spenv, *args, dimension_numbers, slice_sizes, unique_indices,
@@ -687,7 +719,7 @@ def _sparsify_jaxpr(spenv, jaxpr, *spvalues):
   #   shared data & indices when generating the sparsified jaxpr. The
   #   current approach produces valid sparsified while loops, but they
   #   don't work in corner cases (see associated TODO in sparsify_test.py)
-  out_tree = None
+  out_tree: pytree.PyTreeDef | None = None
 
   @lu.wrap_init
   def wrapped(*args_flat):
@@ -705,9 +737,10 @@ def _sparsify_jaxpr(spenv, jaxpr, *spvalues):
 
   args = spvalues_to_arrays(spenv, spvalues)
   args_flat, in_tree = tree_flatten(args)
-  avals_flat = [core.raise_to_shaped(core.get_aval(arg)) for arg in args_flat]
-  sp_jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped, avals_flat)
+  avals_flat = [core.get_aval(arg) for arg in args_flat]
+  sp_jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(wrapped, avals_flat)
   sp_jaxpr = pe.ClosedJaxpr(sp_jaxpr, consts)
+  assert out_tree is not None
   return sp_jaxpr, out_tree
 
 def _while_sparse(spenv, *spvalues, cond_jaxpr, cond_nconsts, body_jaxpr, body_nconsts):
@@ -728,54 +761,47 @@ def _while_sparse(spenv, *spvalues, cond_jaxpr, cond_nconsts, body_jaxpr, body_n
 
 sparse_rules_bcoo[lax.while_p] = _while_sparse
 
-def _xla_call_sparse(spenv, *spvalues, call_jaxpr, donated_invars, **params):
-  if any(donated_invars):
-    raise NotImplementedError("sparse xla_call with donated_invars")
-  sp_call_jaxpr, out_tree = _sparsify_jaxpr(spenv, pe.ClosedJaxpr(call_jaxpr, ()), *spvalues)
-  fun = lu.wrap_init(core.jaxpr_as_fun(sp_call_jaxpr))
-  args_flat, _ = tree_flatten(spvalues_to_arrays(spenv, spvalues))
-  donated_invars = tuple(False for arg in args_flat)
-  out_flat = xla.xla_call_p.bind(fun, *args_flat, donated_invars=donated_invars, **params)
-  return arrays_to_spvalues(spenv, tree_unflatten(out_tree, out_flat))
-
-sparse_rules_bcoo[xla.xla_call_p] = _xla_call_sparse
-
 
 def _pjit_sparse(spenv, *spvalues, jaxpr, in_shardings, out_shardings,
-                 resource_env, donated_invars, name, in_positional_semantics,
-                 out_positional_semantics, keep_unused, inline):
-  if not config.jax_array:
-    raise ValueError('sparse pjit is only supported with jax.Array.')
+                 in_layouts, out_layouts, resource_env, donated_invars, name,
+                 keep_unused, inline, compiler_options_kvs):
   if any(donated_invars):
     raise NotImplementedError("sparse xla_call with donated_invars")
 
   sp_call_jaxpr, out_tree = _sparsify_jaxpr(spenv, jaxpr, *spvalues)
   args_flat, _ = tree_flatten(spvalues_to_arrays(spenv, spvalues))
   donated_invars = tuple(False for arg in args_flat)
-  in_positional_semantics = tuple(pxla._PositionalSemantics.GLOBAL
-                                  for _ in args_flat)
-  out_positional_semantics = tuple(pxla._PositionalSemantics.GLOBAL
-                                   for _ in sp_call_jaxpr.out_avals)
 
   # TODO(yashkatariya, vanderplas): Flatten twice and set the correct sharding
   # for data and indices.
   in_shardings = in_shardings + tuple(
-      pxla._UNSPECIFIED for _ in range(len(args_flat) - len(in_shardings)))
+      sharding_impls.UNSPECIFIED
+      for _ in range(len(args_flat) - len(in_shardings))
+  )
   out_shardings = out_shardings + tuple(
-      pxla._UNSPECIFIED for _ in range(len(sp_call_jaxpr.out_avals) - len(out_shardings)))
+      sharding_impls.UNSPECIFIED
+      for _ in range(len(sp_call_jaxpr.out_avals) - len(out_shardings))
+  )
+  in_layouts = in_layouts + tuple(
+      None for _ in range(len(args_flat) - len(in_layouts))
+  )
+  out_layouts = out_layouts + tuple(
+      None for _ in range(len(sp_call_jaxpr.out_avals) - len(out_layouts))
+  )
 
   out_flat = pjit.pjit_p.bind(
       *args_flat,
       jaxpr=sp_call_jaxpr,
       in_shardings=in_shardings,
       out_shardings=out_shardings,
+      in_layouts=in_layouts,
+      out_layouts=out_layouts,
       resource_env=resource_env,
       donated_invars=donated_invars,
       name=name,
-      in_positional_semantics=in_positional_semantics,
-      out_positional_semantics=out_positional_semantics,
       keep_unused=keep_unused,
-      inline=inline)
+      inline=inline,
+      compiler_options_kvs=compiler_options_kvs)
   return arrays_to_spvalues(spenv, tree_unflatten(out_tree, out_flat))
 
 sparse_rules_bcoo[pjit.pjit_p] = _pjit_sparse
@@ -801,10 +827,10 @@ def _scan_sparse(spenv, *spvalues, jaxpr, num_consts, num_carry, **params):
   # params['linear'] has one entry per arg; expand it to match the sparsified args.
   const_linear, carry_linear, xs_linear = split_list(
     params.pop('linear'), [num_consts, num_carry])
-  sp_linear = tuple([
+  sp_linear = (
     *_duplicate_for_sparse_spvalues(const_spvalues, const_linear),
     *_duplicate_for_sparse_spvalues(carry_spvalues, carry_linear),
-    *_duplicate_for_sparse_spvalues(xs_spvalues, xs_linear)])
+    *_duplicate_for_sparse_spvalues(xs_spvalues, xs_linear))
 
   out = lax.scan_p.bind(*consts, *carry, *xs, jaxpr=sp_jaxpr, linear=sp_linear,
                         num_consts=len(consts), num_carry=len(carry), **params)
@@ -814,15 +840,15 @@ def _scan_sparse(spenv, *spvalues, jaxpr, num_consts, num_carry, **params):
 
 sparse_rules_bcoo[lax.scan_p] = _scan_sparse
 
-def _cond_sparse(spenv, pred, *operands, branches, linear, **params):
+def _cond_sparse(spenv, pred, *operands, branches, **params):
   sp_branches, treedefs = zip(*(_sparsify_jaxpr(spenv, jaxpr, *operands)
                                 for jaxpr in branches))
-  _check_tree_and_avals("sparsified true_fun and false_fun output",
+  _check_tree_and_avals("sparsified true_fun output",
                         treedefs[0], sp_branches[0].out_avals,
+                        "sparsified false_fun output",
                         treedefs[1], sp_branches[1].out_avals)
-  sp_linear = tuple(_duplicate_for_sparse_spvalues(operands, linear))
   args, _ = tree_flatten(spvalues_to_arrays(spenv, (pred, *operands)))
-  out_flat = lax.cond_p.bind(*args, branches=sp_branches, linear=sp_linear, **params)
+  out_flat = lax.cond_p.bind(*args, branches=sp_branches, **params)
   out = tree_unflatten(treedefs[0], out_flat)
   return arrays_to_spvalues(spenv, out)
 
@@ -834,9 +860,28 @@ def _todense_sparse_rule(spenv, spvalue, *, tree):
   return (spenv.dense(out),)
 
 sparse_rules_bcoo[sparse.todense_p] = _todense_sparse_rule
+sparse_rules_bcsr[sparse.todense_p] = _todense_sparse_rule
+
+def _custom_jvp_sparse_rule(spenv, *spvalues, **params):
+  call_jaxpr = params.pop('call_jaxpr')
+  jvp_jaxpr_thunk = params.pop('jvp_jaxpr_thunk')
+  num_consts = params.pop('num_consts')
+  sp_call_jaxpr, out_tree = _sparsify_jaxpr(spenv, call_jaxpr, *spvalues)
+  @lu.wrap_init
+  def fun(*arrs):
+    sparrs = arrays_to_spvalues(spenv, arrs)
+    out = eval_sparse(call_jaxpr.jaxpr, call_jaxpr.consts, sparrs, spenv)
+    return spvalues_to_arrays(spenv, out)
+  jvp = lift_jvp(num_consts, jvp_jaxpr_thunk)
+  invals = spvalues_to_arrays(spenv, spvalues)
+  outvals = jax.custom_derivatives.custom_jvp_call_p.bind(fun, jvp, *invals, **params)
+  return arrays_to_spvalues(spenv, outvals)
+
+sparse_rules_bcoo[jax.custom_derivatives.custom_jvp_call_p] = _custom_jvp_sparse_rule
+sparse_rules_bcsr[jax.custom_derivatives.custom_jvp_call_p] = _custom_jvp_sparse_rule
 
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # BCOO methods derived from sparsify
 # defined here to avoid circular imports
 
@@ -845,7 +890,7 @@ def _sum(self, *args, **kwargs):
   return sparsify(lambda x: x.sum(*args, **kwargs))(self)
 
 def _reshape(self, *args, **kwargs):
-  """Sum array along axis."""
+  """Returns an array containing the same data with a new shape."""
   return sparsify(lambda x: x.reshape(*args, **kwargs))(self)
 
 def _astype(self, *args, **kwargs):
@@ -879,10 +924,14 @@ _bcoo_methods = {
   "__rmatmul__": sparsify(_swap_args(jnp.matmul)),
   "__mul__": sparsify(jnp.multiply),
   "__rmul__": sparsify(_swap_args(jnp.multiply)),
+  "__truediv__": sparsify(jnp.divide),
+  "__rtruediv__": sparsify(_swap_args(jnp.divide)),
   "__add__": sparsify(jnp.add),
   "__radd__": sparsify(_swap_args(jnp.add)),
   "__sub__": sparsify(jnp.subtract),
   "__rsub__": sparsify(_swap_args(jnp.subtract)),
+  "__pow__": lambda x, y: sparsify(lambda x: jnp.power(x, y))(x),
+  "__rpow__": sparsify(_swap_args(jnp.power)),
   "__getitem__": _bcoo_rewriting_take,
   "__iter__": _sparse_iter,
   "__gt__": sparsify(jnp.greater),
@@ -896,7 +945,7 @@ _bcoo_methods = {
 for method, impl in _bcoo_methods.items():
   setattr(BCOO, method, impl)
 
-#------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # BCSR methods derived from sparsify
 # defined here to avoid circular imports
 

@@ -12,14 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_python//python:defs.bzl", "py_library")
 load(
     "//jaxlib:jax.bzl",
     "py_deps",
+    "pytype_strict_library",
 )
 
 licenses(["notice"])
 
-package(default_visibility = ["//visibility:public"])
+package(
+    default_applicable_licenses = [],
+    default_visibility = ["//visibility:public"],
+)
 
 py_library(
     name = "jax_to_ir",
@@ -40,4 +45,9 @@ py_library(
         "//jax",
         "//jax/experimental/jax2tf",
     ] + py_deps("tensorflow_core"),
+)
+
+pytype_strict_library(
+    name = "build_utils",
+    srcs = ["build_utils.py"],
 )

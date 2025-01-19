@@ -11,33 +11,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import functools
+
 import threading
 import unittest
-import warnings
 
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
-from jax._src import core
 from jax import lax
-from jax._src import effects
-from jax._src import linear_util as lu
-from jax.config import config
-from jax.experimental import maps
 from jax.experimental import pjit
-from jax.interpreters import ad
-from jax.interpreters import partial_eval as pe
-from jax._src import sharding
-from jax._src.interpreters import mlir
 from jax._src import ad_checkpoint
 from jax._src import dispatch
+from jax._src import config
+from jax._src import core
+from jax._src import effects
+from jax._src import linear_util as lu
 from jax._src import test_util as jtu
 from jax._src import util
-from jax._src import xla_bridge
+from jax._src.interpreters import ad
+from jax._src.interpreters import mlir
+from jax._src.interpreters import partial_eval as pe
 import numpy as np
 
 config.parse_flags_with_absl()
+jtu.request_cpu_devices(2)
 
 effect_p = core.Primitive('effect')
 effect_p.multiple_results = True
@@ -92,15 +89,15 @@ def function_effect_lowering(ctx, *, effect):
     return []
   func = mlir._emit_lowering_rule_as_fun(_f, ctx)
 
-  output_types = map(mlir.aval_to_ir_types, ctx.avals_out)
+  output_types = map(mlir.aval_to_ir_type, ctx.avals_out)
   effs = list(ctx.tokens_in.effects())
   in_tokens = [ctx.tokens_in.get(eff) for eff in effs]
   token_types = [mlir.token_type() for _ in effs]
   output_types = [*token_types, *output_types]
-  flat_output_types = util.flatten(output_types)
+  flat_output_types = mlir.flatten_ir_types(output_types)
   call = mlir.func_dialect.CallOp(flat_output_types,
                                   mlir.ir.FlatSymbolRefAttr.get(func.name.value),
-                                  mlir.flatten_lowering_ir_args(in_tokens))
+                                  mlir.flatten_ir_values(in_tokens))
   tokens, out = util.split_list(call.results, [len(ctx.tokens_in)])
   ctx.set_tokens_out(mlir.TokenSet(zip(effs, tokens)))
   return out
@@ -123,32 +120,17 @@ def callback_effect_lowering(ctx: mlir.LoweringRuleContext, *args, callback, out
   del out_avals
   token_in = None
   if effects.ordered_effects.contains(effect):
-    token_in = ctx.tokens_in.get(effect)[0]
+    token_in = ctx.tokens_in.get(effect)
 
-  out_op, token_out, keep_alive = mlir.emit_python_callback(
+  out_op, token_out, _ = mlir.emit_python_callback(
       ctx, callback, token_in, list(args), list(ctx.avals_in),
-      list(ctx.avals_out), True)
+      list(ctx.avals_out), has_side_effect=True)
   if token_out:
     ctx.set_tokens_out(ctx.tokens_in.update_tokens(mlir.TokenSet({effect:
       token_out})))
-  ctx.module_context.add_keepalive(keep_alive)
   return out_op
 
 mlir.register_lowering(callback_p, callback_effect_lowering)
-
-
-prev_xla_flags = None
-
-
-def setUpModule():
-  global prev_xla_flags
-  # This will control the CPU devices. On TPU we always have 2 devices
-  prev_xla_flags = jtu.set_host_platform_device_count(2)
-
-
-# Reset to previous configuration in case other test modules will be run.
-def tearDownModule():
-  prev_xla_flags()
 
 
 class JaxprEffectsTest(jtu.JaxTestCase):
@@ -206,7 +188,7 @@ class HigherOrderPrimitiveTest(jtu.JaxTestCase):
     self.assertIn(foo_effect, jaxpr.jaxpr.effects)
     self.assertIn(bar_effect, jaxpr.jaxpr.effects)
 
-  def test_xla_call_primitive_inherits_effects(self):
+  def test_jit_primitive_inherits_effects(self):
 
     @jax.jit
     def f(x):
@@ -274,37 +256,25 @@ class HigherOrderPrimitiveTest(jtu.JaxTestCase):
         r"Ordered effects not supported for map primitives: \[.*\]"):
       jax.make_jaxpr(f)(jnp.arange(jax.local_device_count()))
 
-  def test_xmap_inherits_effects(self):
-    def f(x):
-      effect_p.bind(effect=foo_effect)
-      effect_p.bind(effect=bar_effect)
-      return x
-    f = maps.xmap(f, in_axes=['a'], out_axes=['a'])
-    jaxpr = jax.make_jaxpr(f)(jnp.arange(jax.local_device_count()))
-    self.assertSetEqual(jaxpr.effects, {foo_effect, bar_effect})
-
   def test_pjit_inherits_effects(self):
     def f(x):
       effect_p.bind(effect=foo_effect)
       effect_p.bind(effect=bar_effect)
       return x
     mesh = jax.sharding.Mesh(np.array(jax.devices()), ['x'])
-    if config.jax_array:
-      spec = sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('x'))
-    else:
-      spec = jax.sharding.PartitionSpec('x')
+    spec = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('x'))
     f = pjit.pjit(f, in_shardings=spec, out_shardings=spec)
     with mesh:
       jaxpr = jax.make_jaxpr(f)(np.arange(jax.local_device_count()))
     self.assertSetEqual(jaxpr.effects, {foo_effect, bar_effect})
 
 
+@jtu.thread_unsafe_test_class()  # because of mlir.register_lowering calls
 class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
 
   def setUp(self):
     super().setUp()
-    self.old_x64 = config.jax_enable_x64
-    config.update('jax_enable_x64', False)
+    self.enter_context(config.enable_x64(False))
     self._old_lowering = mlir._lowerings[effect_p]
     def _effect_lowering(ctx, *, effect):
       if effects.ordered_effects.contains(effect):
@@ -321,7 +291,6 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
   def tearDown(self):
     super().tearDown()
     dispatch.runtime_tokens.clear()
-    config.update('jax_enable_x64', self.old_x64)
     mlir.register_lowering(effect_p, self._old_lowering)
 
   def test_can_lower_lowerable_effect(self):
@@ -382,55 +351,6 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
         'incorrect set of output token.'):
       f.lower(2.)
 
-  def test_lowering_ordered_effect_should_create_tokens(self):
-
-    def effect_lowering(ctx, *, effect):
-      ctx.set_tokens_out(ctx.tokens_in)
-      return []
-    mlir.register_lowering(effect_p, effect_lowering)
-
-    @jax.jit
-    def f(x):
-      effect_p.bind(effect=foo_effect)
-      return x + 1.
-    module = f.lower(2.).compiler_ir()
-    main = module.body.operations[0]
-    first_op = main.body.blocks[0].operations[0]
-    self.assertIn('hlo.create_token', first_op.operation.name)
-
-    @jax.jit
-    def f(x):
-      effect_p.bind(effect=foo_effect)
-      effect_p.bind(effect=foo2_effect)
-      return x + 1.
-    module = f.lower(2.).compiler_ir()
-    main = module.body.operations[0]
-    first_op = main.body.blocks[0].operations[0]
-    self.assertIn('hlo.create_token', first_op.operation.name)
-    second_op = main.body.blocks[0].operations[1]
-    self.assertIn('hlo.create_token', second_op.operation.name)
-
-    @jax.jit
-    def f(x):
-      effect_p.bind(effect=foo_effect)
-      return x + 1.
-    module = f.lower(2.).compiler_ir()
-    main = module.body.operations[0]
-    first_op = main.body.blocks[0].operations[0]
-    self.assertIn('hlo.create_token', first_op.operation.name)
-
-    @jax.jit
-    def f(x):
-      effect_p.bind(effect=foo_effect)
-      effect_p.bind(effect=foo2_effect)
-      return x + 1.
-    module = f.lower(2.).compiler_ir()
-    main = module.body.operations[0]
-    first_op = main.body.blocks[0].operations[0]
-    self.assertIn('hlo.create_token', first_op.operation.name)
-    second_op = main.body.blocks[0].operations[1]
-    self.assertIn('hlo.create_token', second_op.operation.name)
-
   def test_nontrivial_lowering_with_ordered_effect_should_consume_token(self):
 
     mlir.register_lowering(effect_p, function_effect_lowering)
@@ -441,12 +361,11 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
       return x + 1.
     module = f.lower(2.).compiler_ir()
     main = module.body.operations[0]
-    first_op = main.body.blocks[0].operations[0]
-    self.assertIn('hlo.create_token', first_op.operation.name)
-    second_op = main.body.blocks[0].operations[1]
-    self.assertEqual(second_op.operation.name, "func.call")
-    self.assertEqual(str(second_op.attributes["callee"]), "@effect")
-    self.assertEqual(second_op.operands[0].owner, first_op)
+    call_op = main.body.blocks[0].operations[0]
+
+    self.assertEqual(call_op.operation.name, 'func.call')
+    self.assertEqual(str(call_op.attributes['callee']), '@effect')
+
     func = module.body.operations[1]
     self.assertEqual(func.name.value, "effect")
     self.assertIn('hlo.token', str(func.type.inputs[0]))
@@ -486,23 +405,24 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
     self.assertLen(list(result_types), 1)
     self.assertEqual(str(result_types[0]), 'tensor<f32>')
 
-  def test_lowered_jaxpr_with_ordered_effects_takes_in_dummy_inputs(self):
+  def test_lowered_jaxpr_with_ordered_effects_takes_token_inputs(self):
     @jax.jit
     def f(x):
       effect_p.bind(effect=foo_effect)
       return x + 1.
     module = f.lower(1.).compiler_ir()
     input_types = module.body.operations[0].type.inputs
-    # First argument should be dummy token
+    token_type = '!stablehlo.token'
+    # First argument should be a token
     self.assertLen(list(input_types), 2)
-    self.assertEqual(str(input_types[0]), 'tensor<0xi1>')
+    self.assertEqual(str(input_types[0]), token_type)
 
-    # First output should be dummy token
+    # First output should be a token
     result_types = module.body.operations[0].type.results
     self.assertLen(list(result_types), 2)
-    self.assertEqual(str(result_types[0]), 'tensor<0xi1>')
+    self.assertEqual(str(result_types[0]), token_type)
 
-  def test_lowered_jaxpr_with_multiple_ordered_effects_takes_in_dummy_inputs(self):
+  def test_lowered_jaxpr_with_multiple_ordered_effects_takes_in_tokens(self):
     @jax.jit
     def f(x):
       effect_p.bind(effect=foo_effect)
@@ -510,16 +430,17 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
       return x + 1.
     module = f.lower(1.).compiler_ir()
     input_types = module.body.operations[0].type.inputs
-    # First two arguments should be dummy values
+    token_type = '!stablehlo.token'
+    # First two arguments should be token values
     self.assertLen(list(input_types), 3)
-    self.assertEqual(str(input_types[0]), 'tensor<0xi1>')
-    self.assertEqual(str(input_types[1]), 'tensor<0xi1>')
+    self.assertEqual(str(input_types[0]), token_type)
+    self.assertEqual(str(input_types[1]), token_type)
 
-    # First two outputs should be dummy values
+    # First two outputs should be token values
     result_types = module.body.operations[0].type.results
     self.assertLen(list(result_types), 3)
-    self.assertEqual(str(result_types[0]), 'tensor<0xi1>')
-    self.assertEqual(str(result_types[1]), 'tensor<0xi1>')
+    self.assertEqual(str(result_types[0]), token_type)
+    self.assertEqual(str(result_types[1]), token_type)
 
   def test_can_lower_and_run_jaxpr_with_ordered_effects(self):
     @jax.jit
@@ -543,12 +464,8 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
     def f(x):
       effect_p.bind(effect=bar_effect)
       return x + 1
-    with self.assertRaisesRegex(
-        NotImplementedError,
-        "Cannot execute replicated computation with effects."):
-      with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        f(jnp.arange(jax.device_count()))
+    with jtu.ignore_warning():
+      f(jnp.arange(jax.device_count()))  # doesn't crash
 
   def test_cant_jit_and_pmap_function_with_ordered_effects(self):
     @jax.jit
@@ -566,11 +483,11 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
     def f(x):
       effect_p.bind(effect=foo_effect)
       return x + 1.
-    self.assertNotIn(foo_effect, dispatch.runtime_tokens.tokens)
+    self.assertNotIn(foo_effect, dispatch.runtime_tokens.current_tokens)
     f(2.)
-    prev_token = dispatch.runtime_tokens.tokens[foo_effect]
+    prev_token = dispatch.runtime_tokens.current_tokens[foo_effect]
     f(2.)
-    curr_token = dispatch.runtime_tokens.tokens[foo_effect]
+    curr_token = dispatch.runtime_tokens.current_tokens[foo_effect]
     self.assertIsNot(prev_token, curr_token)
 
   def test_can_lower_multiple_effects(self):
@@ -583,29 +500,23 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
     def g(x):
       effect_p.bind(effect=foo_effect)
       return x + 1.
-    self.assertNotIn(foo_effect, dispatch.runtime_tokens.tokens)
-    self.assertNotIn(foo2_effect, dispatch.runtime_tokens.tokens)
-    f(2.).block_until_ready()
-    foo_token = dispatch.runtime_tokens.tokens[foo_effect][0]
-    foo2_token = dispatch.runtime_tokens.tokens[foo2_effect][0]
+    self.assertNotIn(foo_effect, dispatch.runtime_tokens.current_tokens)
+    self.assertNotIn(foo2_effect, dispatch.runtime_tokens.current_tokens)
     f(2.)
-    self.assertIsNot(foo_token, dispatch.runtime_tokens.tokens[foo_effect][0])
-    self.assertIsNot(foo2_token, dispatch.runtime_tokens.tokens[foo2_effect][0])
-    foo_token = dispatch.runtime_tokens.tokens[foo_effect][0]
-    foo2_token = dispatch.runtime_tokens.tokens[foo2_effect][0]
+    foo_token = dispatch.runtime_tokens.current_tokens[foo_effect]
+    foo2_token = dispatch.runtime_tokens.current_tokens[foo2_effect]
+    f(2.)
+    self.assertIsNot(foo_token, dispatch.runtime_tokens.current_tokens[foo_effect])
+    self.assertIsNot(foo2_token, dispatch.runtime_tokens.current_tokens[foo2_effect])
+    foo_token = dispatch.runtime_tokens.current_tokens[foo_effect]
+    foo2_token = dispatch.runtime_tokens.current_tokens[foo2_effect]
     g(2.)
-    self.assertIsNot(foo_token, dispatch.runtime_tokens.tokens[foo_effect][0])
-    self.assertIs(foo2_token, dispatch.runtime_tokens.tokens[foo2_effect][0])
+    self.assertIsNot(foo_token, dispatch.runtime_tokens.current_tokens[foo_effect])
+    self.assertIs(foo2_token, dispatch.runtime_tokens.current_tokens[foo2_effect])
 
-@jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
 class EffectOrderingTest(jtu.JaxTestCase):
 
   def test_can_execute_python_callback(self):
-    # TODO(sharadmv): enable this test on GPU and TPU when backends are
-    # supported
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     log = []
     def log_value(x):
       log.append(x)
@@ -622,13 +533,9 @@ class EffectOrderingTest(jtu.JaxTestCase):
     jax.effects_barrier()
     self.assertListEqual(log, [2., 3.])
 
+  # TODO(b/307211483): Investigate failure
   @jtu.skip_on_devices("tpu")
   def test_ordered_effect_remains_ordered_across_multiple_devices(self):
-    # TODO(sharadmv): enable this test on GPU and TPU when backends are
-    # supported
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices.")
 
@@ -637,40 +544,42 @@ class EffectOrderingTest(jtu.JaxTestCase):
       log.append(x)
       return ()
 
-    @functools.partial(jax.jit, device=jax.devices()[0])
+    @jax.jit
     def f(x):
       # Expensive computation
       x = x.dot(x)
       x = jnp.log(x.sum())
       return callback_p.bind(x, callback=log_value, effect=log_effect, out_avals=[])
 
-    @functools.partial(jax.jit, device=jax.devices()[1])
+    @jax.jit
     def g(x):
       return callback_p.bind(x, callback=log_value, effect=log_effect, out_avals=[])
 
-    f(jnp.ones((500, 500)))
-    g(3.)
-    f(jnp.ones((500, 500)))
-    g(3.)
-    f(jnp.ones((500, 500)))
-    g(3.)
+    x = jax.device_put(jnp.ones((500, 500)), jax.devices()[0])
+    y = jax.device_put(3., jax.devices()[1])
+    for _ in range(3):
+      f(x)
+      g(y)
     jax.effects_barrier()
-    x_, y_ = float(jnp.log(1.25e8)), 3.
-    expected_log = [x_, y_, x_, y_, x_, y_]
+    f_, g_ = float(jnp.log(1.25e8)), 3.
+    expected_log = [f_, g_, f_, g_, f_, g_]
     self.assertListEqual(log, expected_log)
 
-  @jtu.skip_on_devices("tpu")
   def test_different_threads_get_different_tokens(self):
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices.")
     tokens = []
     def _noop(_):
-      tokens.append(dispatch.runtime_tokens.tokens[log_effect][0])
       return ()
 
-    @functools.partial(jax.jit, device=jax.devices()[0])
     def f(x):
-      return callback_p.bind(x, callback=_noop, effect=log_effect, out_avals=[])
+      # Runs in a thread.
+      res = jax.jit(
+          lambda x: callback_p.bind(
+              x, callback=_noop, effect=log_effect, out_avals=[])
+      )(x)
+      tokens.append(dispatch.runtime_tokens.current_tokens[log_effect])
+      return res
 
     t1 = threading.Thread(target=lambda: f(2.))
     t2 = threading.Thread(target=lambda: f(3.))
@@ -711,13 +620,7 @@ class ParallelEffectsTest(jtu.JaxTestCase):
       return x
     jax.pmap(f)(jnp.arange(jax.local_device_count()))
 
-  @jtu.pytest_mark_if_available('pjrt_c_api_unimplemented')  # host callback
   def test_can_pmap_unordered_callback(self):
-    # TODO(sharadmv): enable this test on GPU and TPU when backends are
-    # supported
-    if xla_bridge.get_backend().runtime_type == 'stream_executor':
-      raise unittest.SkipTest('Host callback not supported for runtime type: stream_executor.')
-
     if jax.device_count() < 2:
       raise unittest.SkipTest("Test requires >= 2 devices.")
 
@@ -1074,6 +977,27 @@ class JaxprInputEffectTest(jtu.JaxTestCase):
     self.assertIn(InputEffect(2), jaxpr.effects)
 
     jaxpr = jax.make_jaxpr(make_fun(2))(jnp.arange(8), 0)
+    self.assertIn(InputEffect(0), jaxpr.effects)
+
+  def test_jaxpr_input_effect_is_tracked_through_scan_with_dce(self):
+    c = np.ones(2)
+    def make_fun(index):
+      def f(xs, z):
+        def body(z, x):
+          input_effect(x, z, c, index=index)
+          return z, x
+        lax.scan(body, z, xs)
+      return f
+    jaxpr = jax.make_jaxpr(make_fun(0))(jnp.arange(8), 0)
+    jaxpr, _ = pe.dce_jaxpr(jaxpr.jaxpr, [])
+    self.assertIn(InputEffect(1), jaxpr.effects)
+
+    jaxpr = jax.make_jaxpr(make_fun(1))(jnp.arange(8), 0)
+    jaxpr, _ = pe.dce_jaxpr(jaxpr.jaxpr, [])
+    self.assertIn(InputEffect(2), jaxpr.effects)
+
+    jaxpr = jax.make_jaxpr(make_fun(2))(jnp.arange(8), 0)
+    jaxpr, _ = pe.dce_jaxpr(jaxpr.jaxpr, [])
     self.assertIn(InputEffect(0), jaxpr.effects)
 
   def test_jaxpr_input_effect_is_tracked_through_cond(self):

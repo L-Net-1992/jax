@@ -27,10 +27,10 @@ from jax import lax
 from jax.tree_util import register_pytree_node_class
 
 import jax._src.scipy.sparse.linalg as sp_linalg
+from jax._src import config
 from jax._src import dtypes
 from jax._src import test_util as jtu
 
-from jax.config import config
 config.parse_flags_with_absl()
 
 
@@ -100,7 +100,7 @@ class LaxBackedScipyTests(jtu.JaxTestCase):
     preconditioner=[None, 'identity', 'exact', 'random'],
   )
   def test_cg_against_scipy(self, shape, dtype, preconditioner):
-    if not config.x64_enabled:
+    if not config.enable_x64.value:
       raise unittest.SkipTest("requires x64 mode")
 
     rng = jtu.rand_default(self.rng())
@@ -221,7 +221,7 @@ class LaxBackedScipyTests(jtu.JaxTestCase):
   )
   def test_bicgstab_against_scipy(
       self, shape, dtype, preconditioner):
-    if not config.jax_enable_x64:
+    if not config.enable_x64.value:
       raise unittest.SkipTest("requires x64 mode")
 
     rng = jtu.rand_default(self.rng())
@@ -326,7 +326,7 @@ class LaxBackedScipyTests(jtu.JaxTestCase):
   )
   def test_gmres_against_scipy(
       self, shape, dtype, preconditioner, solve_method):
-    if not config.x64_enabled:
+    if not config.enable_x64.value:
       raise unittest.SkipTest("requires x64 mode")
 
     rng = jtu.rand_default(self.rng())
@@ -420,7 +420,7 @@ class LaxBackedScipyTests(jtu.JaxTestCase):
     self.assertAlmostEqual(expected["a"], actual["a"], places=5)
     self.assertAlmostEqual(expected["b"], actual["b"], places=5)
 
-  @jtu.skip_on_devices('tpu')
+  @jax.default_matmul_precision("float32")
   def test_gmres_matmul(self):
     A = CustomOperator(2 * jnp.eye(3))
     b = jnp.arange(9.0).reshape(3, 3)
@@ -437,7 +437,7 @@ class LaxBackedScipyTests(jtu.JaxTestCase):
     """
     The Arnoldi decomposition within GMRES is correct.
     """
-    if not config.x64_enabled:
+    if not config.enable_x64.value:
       raise unittest.SkipTest("requires x64 mode")
 
     rng = jtu.rand_default(self.rng())
@@ -462,14 +462,14 @@ class LaxBackedScipyTests(jtu.JaxTestCase):
           k, A_mv, M, Q, H)
     QA = matmul_high_precision(Q[:, :n].conj().T, A)
     QAQ = matmul_high_precision(QA, Q[:, :n])
-    self.assertAllClose(QAQ, H.T[:n, :], rtol=1e-5, atol=1e-5)
+    self.assertAllClose(QAQ, H.T[:n, :], rtol=2e-5, atol=2e-5)
 
   def test_gmres_weak_types(self):
     x, _ = jax.scipy.sparse.linalg.gmres(lambda x: x, 1.0)
     self.assertTrue(dtypes.is_weakly_typed(x))
 
   def test_linear_solve_batching_via_jacrev(self):
-    # See https://github.com/google/jax/issues/14249
+    # See https://github.com/jax-ml/jax/issues/14249
     rng = np.random.RandomState(0)
     M = rng.randn(5, 5)
     A = np.dot(M, M.T)

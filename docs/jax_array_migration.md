@@ -1,6 +1,8 @@
 (jax-array-migration)=
 # jax.Array migration
 
+<!--* freshness: { reviewed: '2023-03-17' } *-->
+
 **yashkatariya@**
 
 ## TL;DR
@@ -88,11 +90,12 @@ Example:
 ```
 import jax
 import jax.numpy as jnp
-
+from jax.sharding import PartitionSpec as P
+import numpy as np
 x = jnp.arange(8)
 
 # Let's say there are 8 devices in jax.devices()
-mesh = jax.sharding.Mesh(jax.devices().reshape(4, 2), ('x', 'y'))
+mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(4, 2), ('x', 'y'))
 sharding = jax.sharding.NamedSharding(mesh, P('x'))
 
 sharded_x = jax.device_put(x, sharding)

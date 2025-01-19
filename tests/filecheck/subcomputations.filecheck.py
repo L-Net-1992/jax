@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Tests for lowering of array origami ops into MLIR.
+# Tests for MLIR helpers.
 
 # RUN: %PYTHON %s | FileCheck %s
 
 from absl import app
 
 import jax
-from jax import numpy as jnp
 from jax.interpreters import mlir
 from jax._src.lib.mlir import ir
 import numpy as np
@@ -39,15 +38,15 @@ def main(_):
   # CHECK-NOT: func private @cumsum
   @print_ir(np.empty([2, 7], np.int32), np.empty([2, 7], np.int32))
   def cumsum_only_once(x, y):
-    return jnp.cumsum(x) + jnp.cumsum(y)
+    return jax.lax.cumsum(x) + jax.lax.cumsum(y)
 
   # Test merging modules
   # CHECK-LABEL: TEST: merge_modules
   # CHECK: module @jit_g
-  # CHECK: func public @main
-  # CHECK: func private @f
-  # CHECK: func private @m2_main_renamed
-  # CHECK: func private @f_0
+  # CHECK: func public @main(
+  # CHECK: func private @f(
+  # CHECK: func private @m2_main_renamed(
+  # CHECK: func private @f_0(
   def make_module(c):
     @jax.jit
     def f(x):
@@ -68,6 +67,35 @@ def main(_):
     mlir.merge_mlir_modules(m1, "m2_main_renamed", m2_copy)
   print("\nTEST: merge_modules")
   print(str(m1))
+
+
+  # Test symbol renaming when merging modules
+  # CHECK-LABEL: TEST: merge_modules_2
+  # CHECK: module @jit_f
+  # CHECK: func public @main(
+  # CHECK: call @f(
+  # CHECK: func private @f(
+  # CHECK: func private @f_0(
+  # CHECK: call @f_1(
+  # CHECK: func private @f_1(
+
+  with mlir.make_ir_context():
+    m_str = """
+module @jit_f {
+  func.func public @main(%arg0: tensor<i64>) -> tensor<i64> {
+    %0 = call @f(%arg0) : (tensor<i64>) -> tensor<i64>
+    return %0 : tensor<i64>
+  }
+  func.func private @f(%arg0: tensor<i64>) -> tensor<i64> {
+    return %arg0 : tensor<i64>
+  }
+}"""
+    m1 = ir.Module.parse(m_str)
+    m2 = ir.Module.parse(m_str)
+    mlir.merge_mlir_modules(m1, "f", m2)
+  print("\nTEST: merge_modules_2")
+  print(str(m1))
+
 
 if __name__ == "__main__":
   app.run(main)

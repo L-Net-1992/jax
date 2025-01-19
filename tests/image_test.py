@@ -14,7 +14,6 @@
 
 from functools import partial
 import unittest
-import warnings
 
 import numpy as np
 
@@ -25,16 +24,9 @@ from jax import image
 from jax import numpy as jnp
 from jax._src import test_util as jtu
 
-from jax.config import config
-
 # We use TensorFlow and PIL as reference implementations.
 try:
-  # TODO(jakevdp): remove this warning filter when keras requirement is updated.
-  # Warning comes form PIL>=9.1.0 with keras<2.10.0
-  with warnings.catch_warnings():
-    warnings.filterwarnings('ignore', category=DeprecationWarning,
-                            message=".*is deprecated and will be removed in Pillow 10.*")
-    import tensorflow as tf
+  import tensorflow as tf
 except ImportError:
   tf = None
 
@@ -43,7 +35,7 @@ try:
 except ImportError:
   PIL_Image = None
 
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 float_dtypes = jtu.dtypes.all_floating
 inexact_dtypes = jtu.dtypes.inexact
@@ -188,7 +180,7 @@ class ImageTest(jtu.JaxTestCase):
     antialias=[False, True],
   )
   def testResizeEmpty(self, dtype, image_shape, target_shape, method, antialias):
-    # Regression test for https://github.com/google/jax/issues/7586
+    # Regression test for https://github.com/jax-ml/jax/issues/7586
     image = np.ones(image_shape, dtype)
     out = jax.image.resize(image, shape=target_shape, method=method, antialias=antialias)
     self.assertArraysEqual(out, jnp.zeros(target_shape, dtype))

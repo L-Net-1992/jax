@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Workarounds for jax2tf transforms when XLA is not linked in."""
+
+from __future__ import annotations
+
 import builtins
+from collections.abc import Callable, Sequence
 import dataclasses
 from functools import partial, wraps
+import math
 import string
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any
 
 from jax._src import core
 from jax import lax
@@ -27,14 +32,14 @@ from jax._src import util
 from jax.experimental.jax2tf import jax2tf
 
 import numpy as np
-import tensorflow as tf  # type: ignore[import]
+import tensorflow as tf
 
 
 # Implementation rules for primitives when XLA is not linked in. These
 # implementations are workarounds, making use of TF ops that do work when XLA is
 # not linked in. They are only used when the argument `enable_xla=False` when
 # calling jax2tf.convert().
-tf_impl_no_xla: Dict[core.Primitive, Callable[..., Any]] = {}
+tf_impl_no_xla: dict[core.Primitive, Callable[..., Any]] = {}
 
 
 TfVal = Any
@@ -69,7 +74,7 @@ def _invert_permutation(perm):
   return tuple(perm.index(i) for i in range(len(perm)))
 
 
-def _transpose_with_shape(x: TfVal, x_shape: core.Shape, permutation) -> Tuple[TfVal, core.Shape]:
+def _transpose_with_shape(x: TfVal, x_shape: core.Shape, permutation) -> tuple[TfVal, core.Shape]:
   """Computes transposition of x and its shape.
 
   x_shape matches x.shape in the known dimensions, and it has dimension
@@ -80,7 +85,7 @@ def _transpose_with_shape(x: TfVal, x_shape: core.Shape, permutation) -> Tuple[T
 
 def _transpose_for_tf_conv(lhs, lhs_shape: core.Shape,
                            rhs, rhs_shape: core.Shape, dimension_numbers):
-  """Tranposes lhs and rhs to respectively NHWC and HWIO so they can be passed to TF functions.
+  """Transposes lhs and rhs to respectively NHWC and HWIO so they can be passed to TF functions.
 
   The shapes passed in and returned may contain polynomials, and thus may
   be different than lhs.shape and rhs.shape.
@@ -88,7 +93,7 @@ def _transpose_for_tf_conv(lhs, lhs_shape: core.Shape,
   # TODO(marcvanzee): Add tests for this ops for shape polymorphism.
   lhs_perm, rhs_perm, _ = dimension_numbers
 
-  # TODO(marcvanzee): Consider merging tranposes if we want to optimize.
+  # TODO(marcvanzee): Consider merging transposes if we want to optimize.
   # For `lhs_perm` / `output_perm`, perm (0, 1, 2, 3) corresponds to "NCHW".
   lhs, lhs_shape = _transpose_with_shape(lhs, lhs_shape, lhs_perm)  # lhs --> "NCHW"
   if len(lhs_perm) == 3:
@@ -133,6 +138,16 @@ def _pad_spatial_dims(x, x_shape, padding):
   jax2tf._assert_matching_abstract_shape(x, x_shape)
   return x, x_shape
 
+def _check_pad_spatial_dims(x, x_shape, padding):
+  """Pads `x` using `padding`, which specifies padding for the spatial dimensions."""
+  padding = tuple(padding)
+  if len(padding) == len(x_shape) - 2:
+    # If necessary, add empty padding for batch and feature dimensions.
+    no_pad = ((0, 0),)
+    padding = no_pad + padding + no_pad
+  assert len(x.shape) == len(padding)
+  x_shape = tuple(p0 + xs + p1 for xs, (p0, p1) in zip(x_shape, padding))
+  return x, x_shape, padding
 
 def _conv_transpose_pads_to_padtype(kernel_sdims, lhs_dilation, padding):
   """Finds the padding type for a transpose convolution."""
@@ -221,7 +236,7 @@ def _validate_conv_features(
   elif [is_depthwise, is_atrous, is_transpose].count(True) > 1:
     raise _conv_error(
         f"Can only do one of depthwise ({is_depthwise}), atrous ({is_atrous}) "
-        f"and tranposed convolutions ({is_transpose})")
+        f"and transposed convolutions ({is_transpose})")
 
   # We can implement batch grouping when there is a need for it.
   if batch_group_count != 1:
@@ -237,8 +252,8 @@ def _conv_general_dilated(
     lhs, rhs, *, window_strides, padding, lhs_dilation, rhs_dilation,
     dimension_numbers: lax.ConvDimensionNumbers, feature_group_count: int,
     batch_group_count: int,
-    precision: Optional[Tuple[PrecisionType, PrecisionType]],
-    preferred_element_type: Optional[DType],
+    precision: tuple[PrecisionType, PrecisionType] | None,
+    preferred_element_type: DType | None,
     _in_avals: Sequence[core.ShapedArray], _out_aval: core.ShapedArray):
   """Implementation of lax.conv_general_dilated_p using XlaConv."""
   # In presence of shape polymorphism, lhs.shape and rhs.shape may contain
@@ -259,8 +274,8 @@ def _conv_general_dilated(
   in_channels = lhs_shape[-1]
   *rhs_spatial_shapes, _, rhs_out_channel = rhs_shape
 
-  is_transpose = any([d != 1 for d in lhs_dilation])
-  is_atrous = any([d != 1 for d in rhs_dilation])
+  is_transpose = any(d != 1 for d in lhs_dilation)
+  is_atrous = any(d != 1 for d in rhs_dilation)
   is_depthwise = in_channels == feature_group_count and feature_group_count > 1
   _validate_conv_features(is_transpose, is_atrous, is_depthwise,
                           feature_group_count, batch_group_count,
@@ -277,10 +292,10 @@ def _conv_general_dilated(
   else:
     padding_type = pads_to_padtype(
       lhs_shape[1:3], rhs_dilated_shape, window_strides, padding)
-    # We only manually pad if we aren't using a tranposed convolutions.
+    # We only manually pad if we aren't using a transposed convolutions.
     if padding_type == "EXPLICIT":
-      lhs, lhs_shape = _pad_spatial_dims(lhs, lhs_shape, padding)
-      padding_type = "VALID"
+      lhs, lhs_shape, padding = _check_pad_spatial_dims(lhs, lhs_shape, padding)
+      padding_type = padding
 
   if padding_type != "SAME" and any(l < r for l, r in zip(lhs_shape[1:3], rhs_dilated_shape)):
     # If the input shape is smaller than the filter shape in a spatial dimension,
@@ -347,14 +362,18 @@ tf_impl_no_xla[lax.conv_general_dilated_p] = _conv_general_dilated
 
 
 def _dot_general(lhs, rhs, *, dimension_numbers,
-                 precision: Optional[Tuple[PrecisionType, PrecisionType]],
-                 preferred_element_type: Optional[DType],
+                 precision: tuple[PrecisionType, PrecisionType] | None,
+                 preferred_element_type: DType | None,
+                 out_sharding=None,
                  _in_avals: Sequence[core.ShapedArray],
                  _out_aval: core.ShapedArray):
   """Implementation of lax.dot_general_p in terms of tf.linalg.einsum."""
   # Unused arguments.
   del precision
   del preferred_element_type
+
+  lhs, rhs, convert_result = jax2tf._dot_general_convert_to_common_dtype(
+    lhs, _in_avals[0], rhs, _in_avals[1], _out_aval)
 
   (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
   lhs_ndim, rhs_ndim = len(lhs.shape), len(rhs.shape)
@@ -400,9 +419,9 @@ def _dot_general(lhs, rhs, *, dimension_numbers,
       squeeze_idxs.append(len(rhs.shape) - 1)
     result = tf.linalg.matmul(lhs, rhs)
     if len(squeeze_idxs) != 0:
-      assert all([result.shape[i] == 1 for i in squeeze_idxs])
+      assert all(result.shape[i] == 1 for i in squeeze_idxs)
       result = tf.squeeze(result, squeeze_idxs)
-    return result
+    return convert_result(result)
 
   new_id = iter(string.ascii_letters)
   lhs_axis_ids = [next(new_id) for _ in lhs.shape]
@@ -432,7 +451,7 @@ def _dot_general(lhs, rhs, *, dimension_numbers,
   assert lhs.dtype == rhs.dtype
   spec = "{},{}->{}".format("".join(lhs_axis_ids), "".join(rhs_axis_ids),
                             "".join(out_axis_ids))
-  return tf.linalg.einsum(spec, lhs, rhs)
+  return convert_result(tf.linalg.einsum(spec, lhs, rhs))
 
 
 tf_impl_no_xla[lax.dot_general_p] = _dot_general
@@ -441,7 +460,7 @@ tf_impl_no_xla[lax.dot_general_p] = _dot_general
 def _interior_padding(operand, padding_value, padding_config, operand_shape):
   # Used only when enable_xla=False
   # Applies only the interior padding from the padding_config.
-  # We do this somewhat inefficiently, as as a scatter.
+  # We do this somewhat inefficiently, as a scatter.
   # For each dimension we compute the indices_by_dim as [0, f, 2f, 3f, ...] where
   # f is the dilation factor for the dimension, i.e., 1 + interior_padding.
   # Then we compute the cartesian production of the indices (using broadcast
@@ -529,7 +548,12 @@ def _validate_reduce_window_inputs(operand_shape, computation_name, dtype,
     # tf.math.reduce_min.
     raise _reduce_error(f"Min pool does not support operands of type {dtype}")
   if computation_name == "add" and dtype not in [
-      tf.float16, tf.float32, tf.float64
+      tf.bfloat16,
+      tf.float16,
+      tf.float32,
+      tf.float64,
+      tf.int16,
+      tf.int32,
   ]:
     raise _reduce_error("Add pooling does not support operands of type "
                         f"{dtype}")
@@ -568,7 +592,7 @@ def _padding_reduce_window(operand, operand_shape, computation_name,
   padding_type = pads_to_padtype(operand_shape, window_dimensions,
                                  window_strides, padding)
 
-  # https://github.com/google/jax/issues/11874.
+  # https://github.com/jax-ml/jax/issues/11874.
   needs_manual_padding = (
       padding_type == "SAME" and computation_name == "add" and
       window_dimensions != [1] * len(operand_shape))
@@ -630,6 +654,18 @@ def _reduce_monoid(operand, window_dimensions, window_strides, padding,
       has_only_spatial_dims=has_only_spatial_dims)
 
   def tf_pool(inputs, pooling_type):
+    if any(not core.is_constant_shape(s) for s in
+           (window_dimensions, window_strides, dilations)):
+      raise NotImplementedError(
+          f"TODO: use tf.nn.pool with dynamic shapes¨{window_dimensions=} "
+          f" {window_strides=} {dilations=}")
+    # tf.nn.pool() currently does not suport tf.int32 and so we cast back and
+    # forth in order to be able to convert.
+    if (inputs.dtype in [tf.int16, tf.int32]) and computation_name == "add":
+      original_dtype = inputs.dtype
+      inputs = tf.cast(inputs, dtype=tf.float32)
+    else:
+      original_dtype = None
     result = tf.nn.pool(
         inputs,
         window_shape=window_dimensions,
@@ -637,6 +673,8 @@ def _reduce_monoid(operand, window_dimensions, window_strides, padding,
         padding=padding_type,
         strides=window_strides,
         dilations=dilations)
+    if original_dtype:
+      result = tf.cast(result, dtype=original_dtype)
 
     if has_only_spatial_dims:
       # If the input only had spatial dimensions we need to contract the batch
@@ -655,14 +693,14 @@ def _reduce_monoid(operand, window_dimensions, window_strides, padding,
     # TODO(marcvanzee): This may give very large deviations on TPU when using
     # floats as inputs. Alternatively, we could implement this using a
     # convolution with an all-1's kernel.
-    return tf.multiply(tf_pool(operand, "AVG"), np.prod(window_dimensions))
+    return tf.multiply(tf_pool(operand, "AVG"), math.prod(window_dimensions))
 
 
 def _reduce_window(*args, jaxpr, consts, window_dimensions,
                    window_strides, padding, base_dilation, window_dilation,
                    _in_avals: Sequence[core.ShapedArray],
-                   _out_aval: Tuple[core.ShapedArray, ...]
-                   ) -> Tuple[TfVal, ...]:
+                   _out_aval: tuple[core.ShapedArray, ...]
+                   ) -> tuple[TfVal, ...]:
   assert len(consts) == 0, "Reduction computation cannot have constants"
   operands, init_values = util.split_list(args, [len(args) // 2])
 
@@ -695,7 +733,7 @@ def _reduce_window(*args, jaxpr, consts, window_dimensions,
   }[computation_name]
   result = reduce_fn(result, init_value)
 
-  # The outut is expected to be wrapped in a tuple, and since we don't use
+  # The output is expected to be wrapped in a tuple, and since we don't use
   # variadic reductions, this tuple always contains a single element.
   return (result,)
 
@@ -849,7 +887,7 @@ def _pre_gather_for_multidim_indexing(args: GatherArgs):
           == start_index_map[0] and len(offset_dims) == len(op_shape) - 1):
     raise ValueError("unsupported dimension numbers")
   # We added a trailing dimension of size 1
-  if not core.symbolic_equal_dim(args.start_indices_shape[-1], 1):
+  if not core.definitely_equal(args.start_indices_shape[-1], 1):
     raise ValueError("start_indices shape[-1] should be 1")
   # Guess the axis
   axis = collapsed_slice_dims[0]
@@ -861,7 +899,7 @@ def _pre_gather_for_multidim_indexing(args: GatherArgs):
   if offset_dims != expected_offset_dims:
     raise ValueError("unsupported offset_dims")
   expected_slice_sizes = op_shape[:axis] + (1,) + op_shape[axis + 1:]  # type: ignore
-  if not core.symbolic_equal_shape(args.slice_sizes, expected_slice_sizes):
+  if not core.definitely_equal_shape(args.slice_sizes, expected_slice_sizes):
     raise ValueError("unsupported slice_sizes")
 
 
@@ -896,7 +934,7 @@ def _pre_gather_with_batch_dim(args: GatherArgs):
     raise ValueError("unsupported start_index_map")
 
   # The batch dims in `start_indices` and `operand` should agree.
-  if not core.symbolic_equal_dim(args.op_shape[0], args.start_indices_shape[0]):
+  if not core.definitely_equal(args.op_shape[0], args.start_indices_shape[0]):
     raise ValueError("Batch dimensions in operand and start_indices don't "
                      "agree")
 
@@ -912,7 +950,7 @@ def _pre_gather_with_batch_dims(args: GatherArgs):
     #   also need to re-work the output reshaping
     raise ValueError("only len(collapsed_slice_dims) == 0 is supported")
 
-  # NOTE: This supports higher dimensions than listed (the highest dimenison
+  # NOTE: This supports higher dimensions than listed (the highest dimension
   # in the tests is 3D so it is limited to that, but the implementation is
   # designed to handle higher dimensions (N-Dimensional)).
   if len(args.batch_dims) not in [1, 2, 3]:
@@ -937,11 +975,11 @@ def _gather_with_batch_dim(args: GatherArgs):
   return result
 
 
-def _gather_generate_indices(shape: Tuple[int, ...]):
+def _gather_generate_indices(shape: tuple[int, ...]):
   """
   Returns the indices of the according to `shape`:
     each element in the output is the index of an element of an array
-    of the provided shape. The result's shape is (np.prod(shape), len(shape))
+    of the provided shape. The result's shape is (math.prod(shape), len(shape))
 
   For example, given shape (2,2) it returns (0,0),(0,1),(1,0),(1,1)
   """
@@ -1069,7 +1107,7 @@ def _gather(operand, start_indices, *, dimension_numbers,
     try:
       return gather_fn(gather_args)
     except ValueError as e:
-      errors.append(f"{gather_fn}: {repr(e)}")
+      errors.append(f"{gather_fn}: {e!r}")
 
   error_msg = (f"Unsupported arguments for gather: {gather_args}, errors:\n" +
                "\n".join(errors))
@@ -1129,11 +1167,11 @@ tf_impl_no_xla[lax.dynamic_update_slice_p] = _dynamic_update_slice
 
 
 def shift_axes_forward(operand,
-                       axes: Tuple[int, ...],
+                       axes: tuple[int, ...],
                        inverse: bool = False,
                        forward: bool = True):
   """Shifts the tuple of axes to the front of an array"""
-  other_axes = tuple([i for i in range(len(operand.shape)) if i not in axes])
+  other_axes = tuple(i for i in range(len(operand.shape)) if i not in axes)
   fwd_order = axes + other_axes if forward else other_axes + axes
   order = fwd_order if not inverse else _invert_permutation(fwd_order)
   return tf.transpose(operand, order)
@@ -1188,8 +1226,8 @@ def convert_scatter_jax_to_tf(update_op, unsorted_segment_op=None):
     Wrapper around the scatter function.
     The underlying tf ops `tf.tensor_scatter_nd_update` and
     `tf.math.unsorted_segment_*` index from the front dimensions.
-    `tf.math.unsorted_segment_*` indexs to a depth 1 from the front.
-    `tf.tensor_scatter_nd_update` indexs from the front dimensions onwards,
+    `tf.math.unsorted_segment_*` indexes to a depth 1 from the front.
+    `tf.tensor_scatter_nd_update` indexes from the front dimensions onwards,
     with no ability to skip a dimension. This function shifts the axes to be
     indexed to the front then calls a front-specific implementation, then
     inverse-shifts the output.

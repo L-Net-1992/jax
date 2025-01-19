@@ -24,12 +24,11 @@ import numpy as np
 import jax
 from jax import lax
 from jax import random
-from jax.config import config
 from jax.experimental import enable_x64, disable_x64
 import jax.numpy as jnp
 import jax._src.test_util as jtu
 
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 class X64ContextTests(jtu.JaxTestCase):
@@ -49,12 +48,12 @@ class X64ContextTests(jtu.JaxTestCase):
   )
   def test_correctly_capture_default(self, jit, enable_or_disable):
     # The fact we defined a jitted function with a block with a different value
-    # of `config.enable_x64` has no impact on the output.
+    # of `jax.config.enable_x64` has no impact on the output.
     with enable_or_disable():
       func = jit(lambda: jnp.array(np.float64(0)))
       func()
 
-    expected_dtype = "float64" if config._read("jax_enable_x64") else "float32"
+    expected_dtype = "float64" if jax.config._read("jax_enable_x64") else "float32"
     self.assertEqual(func().dtype, expected_dtype)
 
     with enable_x64():
@@ -62,8 +61,8 @@ class X64ContextTests(jtu.JaxTestCase):
     with disable_x64():
       self.assertEqual(func().dtype, "float32")
 
-  @unittest.skipIf(jtu.device_under_test() != "cpu", "Test presumes CPU precision")
   @jtu.sample_product(jit=jtu.JIT_IMPLEMENTATION)
+  @jtu.run_on_devices("cpu")  # Test presumes CPU precision
   def test_near_singular_inverse(self, jit):
     rng = jtu.rand_default(self.rng())
 
@@ -111,8 +110,12 @@ class X64ContextTests(jtu.JaxTestCase):
       self.assertEqual(x64.result(), jnp.int64)
       self.assertEqual(x32.result(), jnp.int32)
 
+  @jax.legacy_prng_key('allow')
+  @jax.debug_key_reuse(False)
+  @jtu.ignore_warning(category=UserWarning,
+                      message="Explicitly requested dtype float64  is not available")
   def test_jit_cache(self):
-    if jtu.device_under_test() == "tpu":
+    if jtu.test_device_matches(["tpu"]):
       self.skipTest("64-bit random not available on TPU")
 
     f = partial(random.uniform, random.PRNGKey(0), (1,), 'float64', -1, 1)
@@ -125,7 +128,7 @@ class X64ContextTests(jtu.JaxTestCase):
 
   @unittest.skip("test fails, see #8552")
   def test_convert_element_type(self):
-    # Regression test for part of https://github.com/google/jax/issues/5982
+    # Regression test for part of https://github.com/jax-ml/jax/issues/5982
     with enable_x64():
       x = jnp.int64(1)
     self.assertEqual(x.dtype, jnp.int64)

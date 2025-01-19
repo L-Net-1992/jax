@@ -18,7 +18,7 @@ used in Keras and Sonnet.
 """
 
 # Note: import <name> as <name> is required for names to be exported.
-# See PEP 484 & https://github.com/google/jax/issues/7570
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
 
 from jax._src.nn.initializers import (
   constant as constant,
@@ -35,17 +35,10 @@ from jax._src.nn.initializers import (
   normal as normal,
   ones as ones,
   orthogonal as orthogonal,
+  truncated_normal as truncated_normal,
   uniform as uniform,
   variance_scaling as variance_scaling,
   xavier_normal as xavier_normal,
   xavier_uniform as xavier_uniform,
   zeros as zeros,
 )
-
-# Set __module__ to the public name.
-def _fixup_modules():
-  for _fn in globals().values():
-    if getattr(_fn, "__module__", None) == "jax._src.nn.initializers":
-      _fn.__module__ = "jax.nn.initializers"
-_fixup_modules()
-del _fixup_modules

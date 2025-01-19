@@ -23,8 +23,7 @@ from jax._src import config as jax_config
 from jax._src.lib.mlir import ir
 from jax import numpy as jnp
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 def module_to_string(module: ir.Module) -> str:
@@ -82,10 +81,16 @@ class MetadataTest(jtu.JaxTestCase):
     def f(which, x):
       return jax.lax.cond(which, x, true_fun, x, false_fun)
     hlo = module_to_string(jax.jit(f).lower(True, 1.).compiler_ir())
-    self.assertRegex(hlo, r'loc\(".*cond\[linear=\(False, False\)\]"')
     self.assertRegex(hlo, r'loc\(".*cond/branch_0_fun/cos"')
     self.assertRegex(hlo, r'loc\(".*cond/branch_1_fun/sin"')
 
+  def test_argmax(self):
+    def f(x):
+      return jnp.argmax(x)
+    hlo = module_to_string(jax.jit(f).lower(jnp.arange(8.0)).compiler_ir())
+    self.assertNotRegex(hlo, r'<.* at 0x[0-9a-fA-F]+>')
+
+  @unittest.skip('b/352539562')
   def test_source_file_prefix_removal(self):
 
     def make_hlo():
@@ -94,17 +99,17 @@ class MetadataTest(jtu.JaxTestCase):
       )
 
     # Sanity check
-    self.assertIn("/tests/metadata_test.py", make_hlo())
+    self.assertRegex(make_hlo(), r"[/\\]+tests[/\\]+metadata_test.py")
 
-    with jax_config.hlo_source_file_canonicalization_regex(".*/tests/"):
+    with jax_config.hlo_source_file_canonicalization_regex(r".*[\\/]+tests[/\\]+"):
       hlo = make_hlo()
       self.assertIn("metadata_test.py", hlo)
-      self.assertNotIn("tests/", hlo)
-      self.assertNotIn("/metadata_test.py", hlo)
+      self.assertNotRegex(hlo, r"tests[/\\]+")
+      self.assertNotRegex(hlo, r"[/\\]+metadata_test.py")
 
     with jax_config.hlo_source_file_canonicalization_regex("no_match_xxx"):
       hlo = make_hlo()
-      self.assertIn("/tests/metadata_test.py", hlo)
+      self.assertRegex(hlo, r"[/\\]+tests[/\\]+metadata_test.py")
 
     with jax_config.hlo_source_file_canonicalization_regex(".*"):
       hlo = make_hlo()
@@ -112,7 +117,8 @@ class MetadataTest(jtu.JaxTestCase):
 
     with jax_config.hlo_source_file_canonicalization_regex("test"):
       hlo = make_hlo()
-      self.assertIn("/s/metadata_.py", hlo)
+      self.assertRegex(hlo, r"[/\\]+s[/\\]+metadata_.py")
+
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

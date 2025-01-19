@@ -13,76 +13,53 @@
 # limitations under the License.
 
 from jax._src.interpreters.xla import (
-  AxisEnv as AxisEnv,
-  TranslationContext as TranslationContext,
-  TranslationRule as TranslationRule,
-  abstractify as abstractify,
-  axis_groups as axis_groups,
-  backend_specific_translations as backend_specific_translations,
   canonicalize_dtype as canonicalize_dtype,
   canonicalize_dtype_handlers as canonicalize_dtype_handlers,
-  check_backend_matches as check_backend_matches,
-  parameter as parameter,
-  pytype_aval_mappings as pytype_aval_mappings,
-  register_collective_primitive as register_collective_primitive,
-  register_initial_style_primitive as register_initial_style_primitive,
-  register_translation as register_translation,
-  sharding_to_proto as sharding_to_proto,
-  translations as translations,
-  xla_call as xla_call,
-  xla_call_p as xla_call_p,
-  xla_destructure as xla_destructure,
-  xla_shape_handlers as xla_shape_handlers,
 )
 
-from jax._src.core import (
-  ShapedArray as ShapedArray,
-  ConcreteArray as ConcreteArray,
-)
-
-# TODO(phawkins): update users.
 from jax._src.dispatch import (
   apply_primitive as apply_primitive,
-  backend_compile as backend_compile,
-  device_put as device_put,
 )
 
-from jax._src import xla_bridge as xb
-from jax._src.lib import xla_client as xc  # type: ignore
+from jax._src.lib import xla_client as _xc
+Backend = _xc._xla.Client
+del _xc
 
-_deprecated_Device = xc.Device
-XlaOp = xc.XlaOp
-xe = xc._xla
-Backend = xe.Client
-Buffer = xc.Buffer
-_CppDeviceArray = xe.Buffer
+from jax._src import core as _src_core
 
-from jax._src.device_array import (
-  make_device_array as make_device_array,
-  _DeviceArray as _DeviceArray,
-  DeviceArray as _deprecated_DeviceArray,
-)
-
+# Deprecations
 _deprecations = {
-  # Added Feb 9, 2023:
-  "Device": (
-    "jax.interpreters.xla.Device is deprecated. Use jax.Device instead.",
-    _deprecated_Device,
-  ),
-  "DeviceArray": (
-    "jax.interpreters.xla.DeviceArray is deprecated. Use jax.Array instead.",
-    _deprecated_DeviceArray,
-  ),
+    # Added 2024-12-17
+    "abstractify": (
+        "jax.interpreters.xla.abstractify is deprecated.",
+        _src_core.abstractify
+    ),
+    "pytype_aval_mappings": (
+        "jax.interpreters.xla.pytype_aval_mappings is deprecated.",
+        _src_core.pytype_aval_mappings
+    ),
+    # Finalized 2024-10-24; remove after 2025-01-24
+    "xb": (
+        ("jax.interpreters.xla.xb was removed in JAX v0.4.36. "
+         "Use jax.lib.xla_bridge instead."), None
+    ),
+    "xc": (
+        ("jax.interpreters.xla.xc was removed in JAX v0.4.36. "
+         "Use jax.lib.xla_client instead."), None
+    ),
+    "xe": (
+        ("jax.interpreters.xla.xe was removed in JAX v0.4.36. "
+         "Use jax.lib.xla_extension instead."), None
+    ),
 }
 
+import typing as _typing
 from jax._src.deprecations import deprecation_getattr as _deprecation_getattr
-__getattr__ = _deprecation_getattr(__name__, _deprecations)
+if _typing.TYPE_CHECKING:
+  abstractify = _src_core.abstractify
+  pytype_aval_mappings = _src_core.pytype_aval_mappings
+else:
+  __getattr__ = _deprecation_getattr(__name__, _deprecations)
 del _deprecation_getattr
-
-import typing
-if typing.TYPE_CHECKING:
-  Device = xc.Device
-  from jax._src.device_array import (
-    DeviceArray as DeviceArray,
-  )
-del typing
+del _typing
+del _src_core

@@ -34,7 +34,7 @@ import jax.numpy as jnp
 from jax._src import core
 from jax import custom_derivatives
 from jax import lax
-from jax._src.numpy.util import _promote_dtypes_inexact
+from jax._src.numpy.util import promote_dtypes_inexact
 from jax._src.util import safe_map, safe_zip
 from jax.flatten_util import ravel_pytree
 from jax.tree_util import tree_leaves, tree_map
@@ -47,12 +47,12 @@ zip = safe_zip
 def ravel_first_arg(f, unravel):
   return ravel_first_arg_(lu.wrap_init(f), unravel).call_wrapped
 
-@lu.transformation
-def ravel_first_arg_(unravel, y_flat, *args):
+@lu.transformation2
+def ravel_first_arg_(f, unravel, y_flat, *args):
   y = unravel(y_flat)
-  ans = yield (y,) + args, {}
+  ans = f(y, *args)
   ans_flat, _ = ravel_pytree(ans)
-  yield ans_flat
+  return ans_flat
 
 def interp_fit_dopri(y0, y1, k, dt):
   # Fit a polynomial to the results of a Runge-Kutta step.
@@ -76,7 +76,7 @@ def initial_step_size(fun, t0, y0, order, rtol, atol, f0):
   # Algorithm from:
   # E. Hairer, S. P. Norsett G. Wanner,
   # Solving Ordinary Differential Equations I: Nonstiff Problems, Sec. II.4.
-  y0, f0 = _promote_dtypes_inexact(y0, f0)
+  y0, f0 = promote_dtypes_inexact(y0, f0)
   dtype = y0.dtype
 
   scale = atol + jnp.abs(y0) * rtol
@@ -201,7 +201,7 @@ def _odeint(func, rtol, atol, mxstep, hmax, y0, ts, *args):
       next_t = t + dt
       error_ratio = mean_error_ratio(next_y_error, rtol, atol, y, next_y)
       new_interp_coeff = interp_fit_dopri(y, next_y, k, dt)
-      dt = jnp.clip(optimal_step_size(dt, error_ratio), a_min=0., a_max=hmax)
+      dt = jnp.clip(optimal_step_size(dt, error_ratio), min=0., max=hmax)
 
       new = [i + 1, next_y, next_f, next_t, dt,      t, new_interp_coeff]
       old = [i + 1,      y,      f,      t, dt, last_t,     interp_coeff]
@@ -214,7 +214,7 @@ def _odeint(func, rtol, atol, mxstep, hmax, y0, ts, *args):
     return carry, y_target
 
   f0 = func_(y0, ts[0])
-  dt = jnp.clip(initial_step_size(func_, ts[0], y0, 4, rtol, atol, f0), a_min=0., a_max=hmax)
+  dt = jnp.clip(initial_step_size(func_, ts[0], y0, 4, rtol, atol, f0), min=0., max=hmax)
   interp_coeff = jnp.array([y0] * 5)
   init_carry = [y0, f0, ts[0], dt, ts[0], interp_coeff]
   _, ys = lax.scan(scan_fun, init_carry, ts[1:])

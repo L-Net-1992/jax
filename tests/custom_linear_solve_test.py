@@ -25,12 +25,10 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint
 from jax._src import test_util as jtu
-from jax import tree_util
 import jax.numpy as jnp  # scan tests use numpy
 import jax.scipy as jsp
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 def high_precision_dot(a, b):
@@ -160,7 +158,7 @@ class CustomLinearSolveTest(jtu.JaxTestCase):
     # vmap test
     c = rng.randn(3, 2)
     expected = jnp.linalg.solve(a, c)
-    expected_aux = tree_util.tree_map(partial(np.repeat, repeats=2), array_aux)
+    expected_aux = jax.tree.map(partial(np.repeat, repeats=2), array_aux)
     actual_vmap, vmap_aux = jax.vmap(linear_solve_aux, (None, 1), -1)(a, c)
 
     self.assertAllClose(expected, actual_vmap)
@@ -240,7 +238,7 @@ class CustomLinearSolveTest(jtu.JaxTestCase):
     a = rng.randn(2, 2)
     b = rng.randn(2)
 
-    tol = {np.float32: 1E-3 if jtu.device_under_test() == "tpu" else 2E-4,
+    tol = {np.float32: 1E-3 if jtu.test_device_matches(["tpu"]) else 2E-4,
            np.float64: 1E-12}
     expected = jnp.linalg.solve(np.asarray(posify(a)), b)
     actual = positive_definite_solve(posify(a), b)
@@ -293,7 +291,7 @@ class CustomLinearSolveTest(jtu.JaxTestCase):
 
     jtu.check_grads(linear_solve, (a, b), order=2, rtol=2e-3)
 
-    # regression test for https://github.com/google/jax/issues/1536
+    # regression test for https://github.com/jax-ml/jax/issues/1536
     jtu.check_grads(jax.jit(linear_solve), (a, b), order=2,
                     rtol={np.float32: 2e-3})
 
@@ -398,7 +396,7 @@ class CustomLinearSolveTest(jtu.JaxTestCase):
   def test_custom_linear_solve_pytree_with_aux(self):
     # Check that lax.custom_linear_solve handles
     # pytree inputs + has_aux=True
-    # https://github.com/google/jax/pull/13093
+    # https://github.com/jax-ml/jax/pull/13093
 
     aux_orig = {'a': 1, 'b': 2}
     b = {'c': jnp.ones(2), 'd': jnp.ones(3)}
@@ -466,6 +464,23 @@ class CustomLinearSolveTest(jtu.JaxTestCase):
     def linear_solve(a, b):
       return matrix_free_solve(partial(high_precision_dot, a), b)
     jtu.check_grads(linear_solve, (a, b), order=1, rtol=3e-3, modes=['rev'])
+
+  def test_custom_linear_solve_batching_with_aux(self):
+    def solve(mv, b):
+      aux = (np.array(1.), True, 0)
+      return mv(b), aux
+
+    def solve_aux(x):
+      matvec = lambda y: jax.tree.map(partial(jnp.dot, A), y)
+      return lax.custom_linear_solve(matvec, (x, x), solve, solve, symmetric=True, has_aux=True)
+
+    rng = self.rng()
+    A = rng.randn(3, 3)
+    A = A + A.T
+    b = rng.randn(3, 3)
+
+    # doesn't crash
+    jax.vmap(solve_aux)(b)
 
 
 if __name__ == '__main__':

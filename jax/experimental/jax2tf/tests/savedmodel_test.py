@@ -19,17 +19,27 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf  # type: ignore[import]
+import tensorflow as tf
 
 from jax.experimental import jax2tf
 from jax.experimental.jax2tf.tests import tf_test_util
 from jax._src import test_util as jtu
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 class SavedModelTest(tf_test_util.JaxToTfTestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.warning_ctx = jtu.ignore_warning(
+        message="jax2tf.convert with native_serialization=False is deprecated"
+    )
+    self.warning_ctx.__enter__()
+
+  def tearDown(self):
+    self.warning_ctx.__exit__(None, None, None)
+    super().tearDown()
 
   def test_eval(self):
     f_jax = jax.jit(lambda x: jnp.sin(jnp.cos(x)))
@@ -176,7 +186,7 @@ class SavedModelTest(tf_test_util.JaxToTfTestCase):
 
 
   def test_save_grad_integers(self):
-    # https://github.com/google/jax/issues/7123
+    # https://github.com/jax-ml/jax/issues/7123
     # In the end this is a test that does not involve JAX at all
     batch_size = 5
     state = np.array([1], dtype=np.int32)  # Works if float32
@@ -291,8 +301,8 @@ class SavedModelTest(tf_test_util.JaxToTfTestCase):
   # Test does not work on GPU/TPU; would need something like TPU inference
   # converter to separate the model on what needs to run on CPU or accelerator.
   @jtu.skip_on_devices("gpu", "tpu")
-  def test_tf_mix_jax_with_uncompileable(self):
-    """Show how to combine TF-uncompileable code with compiled JAX-converted code."""
+  def test_tf_mix_jax_with_uncompilableble(self):
+    """Show how to combine TF-uncompilableble code with compiled JAX-converted code."""
     def tf_fn(x_str, compute_tf_fn=lambda x: x):
       # Some TF preprocessing code that cannot be compiled with XLA because it
       # uses strings.
